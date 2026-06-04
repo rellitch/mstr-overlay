@@ -1,0 +1,50 @@
+name: MSTR Overlay Daily Monitor
+
+# Runs every weekday at 21:30 UTC (~4:30-5:30pm New York time), after the close.
+# You can also run it on demand from the Actions tab (with an optional debug dump).
+on:
+  schedule:
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Dump raw Tastytrade fields to the log (for first-time checks)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write          # lets the job save the updated log + dashboard back to the repo
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install tastytrade yfinance pandas numpy
+
+      - name: Run monitor
+        env:
+          TASTYTRADE_USERNAME: ${{ secrets.TASTYTRADE_USERNAME }}
+          TASTYTRADE_PASSWORD: ${{ secrets.TASTYTRADE_PASSWORD }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}      # optional (Discord/Slack alerts)
+          BTC_HOLDINGS: ${{ secrets.BTC_HOLDINGS }}    # optional (mNAV context)
+        run: python mstr_overlay.py ${{ (github.event_name == 'workflow_dispatch' && inputs.debug) && '--debug' || '' }}
+
+      - name: Build dashboard
+        run: python build_dashboard.py
+
+      - name: Save log + dashboard
+        run: |
+          git config user.name "mstr-overlay-bot"
+          git config user.email "actions@github.com"
+          git add mstr_overlay_log.csv index.html
+          git diff --staged --quiet || git commit -m "log: $(date -u +%Y-%m-%d) overlay reading"
+          git push
