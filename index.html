@@ -1,0 +1,44 @@
+<!doctype html><html lang='en'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>MSTR Overlay Dashboard</title>
+<style>
+  :root { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  body { margin:0; background:#f7f8fa; color:#1d2939; padding:18px; }
+  h1 { font-size:18px; margin:0 0 2px; }
+  h2 { font-size:15px; margin:26px 0 6px; }
+  .muted { color:#667085; font-size:12px; margin:4px 0 10px; }
+  .banner { color:#fff; border-radius:14px; padding:20px 22px; margin:14px 0 18px; }
+  .banner-state { font-size:24px; font-weight:700; }
+  .banner-blurb { font-size:14px; opacity:.95; margin-top:4px; }
+  .banner-date { font-size:12px; opacity:.85; margin-top:8px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .card { background:#fff; border:1px solid #eaecf0; border-radius:12px; padding:12px 14px; }
+  .card .k { font-size:12px; color:#667085; }
+  .card .v { font-size:22px; font-weight:700; margin:2px 0; }
+  .card .s { font-size:11px; color:#98a2b3; }
+  table { width:100%; border-collapse:collapse; font-size:12px; background:#fff;
+           border:1px solid #eaecf0; border-radius:12px; overflow:hidden; }
+  th,td { padding:7px 9px; text-align:left; border-bottom:1px solid #f0f1f3; white-space:nowrap; }
+  th { background:#fafbfc; color:#475467; font-weight:600; }
+  .pill { color:#fff; padding:2px 8px; border-radius:999px; font-size:11px; }
+  .legend { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+</style></head><body>
+<h1>MSTR Opportunistic Overlay</h1>
+<div class='muted'>Auto-generated 2026-06-05 00:23 UTC. Read-only signal view.</div>
+
+      <div class='banner' style='background:#1f9d57'>
+        <div class='banner-state'>Opportune — sell puts</div>
+        <div class='banner-blurb'>Rich premium + washed-out price.</div>
+        <div class='banner-date'>Latest reading: 2026-06-05</div>
+      </div>
+      <div class='grid'><div class='card'><div class='k'>IV Percentile</div><div class='v'>71</div><div class='s'>primary trigger</div></div><div class='card'><div class='k'>VRP (IV−HV)</div><div class='v'>22.200</div><div class='s'>must be &gt; 0 to act</div></div><div class='card'><div class='k'>RSI(14)</div><div class='v'>33</div><div class='s'>side selection</div></div><div class='card'><div class='k'>Price</div><div class='v'>129.37</div><div class='s'>MSTR close</div></div><div class='card'><div class='k'>vs 50-day MA</div><div class='v'>below</div><div class='s'>calls need &#x27;below&#x27;</div></div><div class='card'><div class='k'>IV30 / HV30</div><div class='v'>75 / 53</div><div class='s'>implied vs realized</div></div><div class='card'><div class='k'>DTE to sell</div><div class='v'>30-38</div><div class='s'>recommended tenor</div></div><div class='card'><div class='k'>mNAV</div><div class='v'>—</div><div class='s'>context (optional)</div></div></div>
+      <h2>IV Percentile — last 90 readings</h2>
+      <p class='muted'>Dashed lines at 50 (opportune threshold) and 80 (extreme threshold). Dot color = state that day.</p>
+      <p style='color:#888'>Not enough data yet for a chart — it fills in as the log grows.</p>
+      <h2>Recent readings</h2>
+      <div class='legend'><span class='pill' style='background:#0f7a3d'>EXTREME_PUTS</span><span class='pill' style='background:#1f9d57'>OPPORTUNE_PUTS</span><span class='pill' style='background:#1769aa'>OPPORTUNE_CALLS</span><span class='pill' style='background:#8a5cc4'>EXTREME_CALLS_FLAG</span><span class='pill' style='background:#6b7a8f'>RICH_NO_SIDE</span><span class='pill' style='background:#6b7280'>NEUTRAL</span></div>
+      <table><thead><tr><th>date</th><th>state</th><th>iv_percentile</th><th>vrp_iv_minus_hv</th><th>rsi14</th><th>close</th><th>below_ma50</th><th>dte_reco</th></tr></thead><tbody><tr><td>2026-06-05</td><td><span class='pill' style='background:#1f9d57'>OPPORTUNE_PUTS</span></td><td>71.0</td><td>22.2</td><td>32.8</td><td>129.37</td><td>True</td><td>30-38</td></tr></tbody></table>
+      <p class='muted'>This is a volatility/price-timing signal only. It does not size positions or place trades,
+      and it is blind to fundamental shocks — your own monitoring sits above it.</p>
+    
+</body></html>
