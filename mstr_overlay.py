@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-MSTR Opportunistic Overlay - daily monitor (REST version)
-=========================================================
-Calls the Tastytrade REST API directly with your username/password to fetch
-market-metrics (IV percentile, IV rank, IV30, IV-HV/VRP), adds price-based
+MSTR Opportunistic Overlay - daily monitor (Tastytrade OAuth version)
+=====================================================================
+Authenticates with Tastytrade via OAuth (client secret + refresh token), which
+is the supported method for automation and is NOT blocked by device challenges.
+Fetches market-metrics (IV percentile, IV rank, IV30, IV-HV/VRP), adds price
 indicators (RSI14, MA20, MA50), classifies the v2 state, logs one row to a CSV,
-and (optionally) alerts on a state change. No Tastytrade SDK is used, so it is
-unaffected by SDK version changes.
+and optionally alerts on a state change.
 
-Auth: env vars TASTYTRADE_USERNAME / TASTYTRADE_PASSWORD.
-Optional alert: env var WEBHOOK_URL (Discord/Slack incoming webhook).
-Optional mNAV context: env var BTC_HOLDINGS.
+Required env vars (set as GitHub secrets):
+  TASTYTRADE_CLIENT_SECRET   - from your Tastytrade OAuth application
+  TASTYTRADE_REFRESH_TOKEN   - from a "Personal OAuth Grant" on that application
+Optional:
+  WEBHOOK_URL   - Discord/Slack incoming webhook for state-change alerts
+  BTC_HOLDINGS  - Strategy's BTC count, for mNAV context
 
 Run:  python mstr_overlay.py            (normal daily run)
       python mstr_overlay.py --debug    (also dumps the raw market-metrics JSON)
@@ -46,7 +49,6 @@ DTE_BY_STATE = {
 
 
 def pct(x):
-    """Normalize a percentile/rank that may arrive as 0-1 or 0-100 (or a string)."""
     if x in (None, ""):
         return float("nan")
     x = float(x)
@@ -60,24 +62,26 @@ def fnum(x):
         return float("nan")
 
 
-def get_tasty_metrics(debug=False):
-    user = os.environ["TASTYTRADE_USERNAME"]
-    pw = os.environ["TASTYTRADE_PASSWORD"]
-
-    # 1) create a session -> session token
-    r = requests.post(f"{TT_BASE}/sessions",
-                      json={"login": user, "password": pw},
+def get_access_token():
+    secret = os.environ["TASTYTRADE_CLIENT_SECRET"]
+    refresh = os.environ["TASTYTRADE_REFRESH_TOKEN"]
+    r = requests.post(f"{TT_BASE}/oauth/token",
+                      json={"grant_type": "refresh_token",
+                            "refresh_token": refresh,
+                            "client_secret": secret},
                       headers={**UA, "Content-Type": "application/json"}, timeout=30)
     if r.status_code >= 400:
-        raise SystemExit(f"Tastytrade login failed (HTTP {r.status_code}). "
-                         f"Check the TASTYTRADE_USERNAME / TASTYTRADE_PASSWORD secrets. "
+        raise SystemExit(f"Tastytrade OAuth token request failed (HTTP {r.status_code}). "
+                         f"Check the TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN secrets. "
                          f"Body: {r.text[:300]}")
-    token = r.json()["data"]["session-token"]
+    return r.json()["access_token"]
 
-    # 2) fetch market metrics for the symbol
+
+def get_tasty_metrics(debug=False):
+    token = get_access_token()
     r = requests.get(f"{TT_BASE}/market-metrics",
                      params={"symbols": SYMBOL},
-                     headers={**UA, "Authorization": token}, timeout=30)
+                     headers={**UA, "Authorization": f"Bearer {token}"}, timeout=30)
     r.raise_for_status()
     items = r.json().get("data", {}).get("items", [])
     if not items:
