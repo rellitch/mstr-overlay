@@ -1,2 +1,3 @@
 date,state,dte_reco,iv_percentile,iv_rank,iv30,hv30,vrp_iv_minus_hv,close,rsi14,ma20,ma50,dist_ma20_pct,below_ma50,beta,mnav
 2026-06-05,OPPORTUNE_PUTS,30-38,71.0,47.3,74.84,52.64,22.2,129.37,32.8,163.93,155.65,-21.1,True,3.33,
+2026-06-05,OPPORTUNE_PUTS,30-38,71.0,47.3,74.84,52.64,22.2,129.37,32.8,163.93,155.65,-21.1,True,3.33,
