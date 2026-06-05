@@ -15,7 +15,7 @@ Optional:
   WEBHOOK_URL   - Discord/Slack incoming webhook for state-change alerts
   BTC_HOLDINGS  - Strategy's BTC count, for mNAV context
 
-Run:  python mstr_overlay.py            (normal daily run)
+Run:  python mstr_overlay.py            (normal run; auto-runs every 30 min on GitHub)
       python mstr_overlay.py --debug    (also dumps the raw market-metrics JSON)
 """
 
@@ -138,14 +138,21 @@ def classify(ivp, vrp, rsi, below_ma50):
     return "RICH_NO_SIDE"
 
 
-def last_logged_state():
+def load_rows():
     if not CSV_PATH.exists():
-        return None
+        return []
     try:
-        df = pd.read_csv(CSV_PATH)
-        return df.iloc[-1]["state"] if len(df) else None
+        with open(CSV_PATH, newline="") as f:
+            return list(csv.DictReader(f))
     except Exception:
-        return None
+        return []
+
+
+def save_rows(rows, fieldnames):
+    with open(CSV_PATH, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
 
 
 def notify(text):
@@ -193,13 +200,13 @@ def main():
         "mnav": round(mnav, 3) if mnav else "",
     }
 
-    prev = last_logged_state()
-    write_header = not CSV_PATH.exists()
-    with open(CSV_PATH, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if write_header:
-            w.writeheader()
-        w.writerow(row)
+    rows = load_rows()
+    prev = rows[-1]["state"] if rows else None
+    if rows and rows[-1].get("date") == row["date"]:
+        rows[-1] = row              # same day -> update in place (keeps one row per day)
+    else:
+        rows.append(row)            # new day -> add a row
+    save_rows(rows, list(row.keys()))
 
     line = (f"{row['date']}  MSTR ${row['close']}  STATE={state}  "
             f"IVP={row['iv_percentile']}  VRP={row['vrp_iv_minus_hv']}  "
