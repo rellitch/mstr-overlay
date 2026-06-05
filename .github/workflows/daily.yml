@@ -32,8 +32,8 @@ jobs:
 
       - name: Run monitor
         env:
-          TASTYTRADE_USERNAME: ${{ secrets.TASTYTRADE_USERNAME }}
-          TASTYTRADE_PASSWORD: ${{ secrets.TASTYTRADE_PASSWORD }}
+          TASTYTRADE_CLIENT_SECRET: ${{ secrets.TASTYTRADE_CLIENT_SECRET }}
+          TASTYTRADE_REFRESH_TOKEN: ${{ secrets.TASTYTRADE_REFRESH_TOKEN }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}      # optional (Discord/Slack alerts)
           BTC_HOLDINGS: ${{ secrets.BTC_HOLDINGS }}    # optional (mNAV context)
         run: python mstr_overlay.py ${{ (github.event_name == 'workflow_dispatch' && inputs.debug) && '--debug' || '' }}
