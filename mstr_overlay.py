@@ -26,11 +26,30 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import requests
+from requests.adapters import HTTPAdapter
+try:
+    from urllib3.util.retry import Retry
+except Exception:  # pragma: no cover
+    from requests.packages.urllib3.util.retry import Retry
 
 SYMBOL = "MSTR"
 CSV_PATH = Path(__file__).parent / "mstr_overlay_log.csv"
 TT_BASE = "https://api.tastyworks.com"
 UA = {"User-Agent": "mstr-overlay/1.0", "Accept": "application/json"}
+
+
+def _make_session():
+    """requests session that auto-retries transient network/5xx errors with backoff."""
+    s = requests.Session()
+    retry = Retry(total=4, connect=4, read=4, backoff_factor=3,
+                  status_forcelist=[429, 500, 502, 503, 504],
+                  allowed_methods=frozenset(["GET", "POST"]))
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    return s
+
+
+SESSION = _make_session()
+TIMEOUT = (10, 30)  # (connect, read) seconds
 
 # ---- v2 framework thresholds (single place to tune) -------------------------
 IVP_OPP, IVP_XTREME, IVP_XCALL = 50, 80, 90
@@ -65,11 +84,11 @@ def fnum(x):
 def get_access_token():
     secret = os.environ["TASTYTRADE_CLIENT_SECRET"]
     refresh = os.environ["TASTYTRADE_REFRESH_TOKEN"]
-    r = requests.post(f"{TT_BASE}/oauth/token",
-                      json={"grant_type": "refresh_token",
-                            "refresh_token": refresh,
-                            "client_secret": secret},
-                      headers={**UA, "Content-Type": "application/json"}, timeout=30)
+    r = SESSION.post(f"{TT_BASE}/oauth/token",
+                     json={"grant_type": "refresh_token",
+                           "refresh_token": refresh,
+                           "client_secret": secret},
+                     headers={**UA, "Content-Type": "application/json"}, timeout=TIMEOUT)
     if r.status_code >= 400:
         raise SystemExit(f"Tastytrade OAuth token request failed (HTTP {r.status_code}). "
                          f"Check the TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN secrets. "
@@ -79,9 +98,9 @@ def get_access_token():
 
 def get_tasty_metrics(debug=False):
     token = get_access_token()
-    r = requests.get(f"{TT_BASE}/market-metrics",
-                     params={"symbols": SYMBOL},
-                     headers={**UA, "Authorization": f"Bearer {token}"}, timeout=30)
+    r = SESSION.get(f"{TT_BASE}/market-metrics",
+                    params={"symbols": SYMBOL},
+                    headers={**UA, "Authorization": f"Bearer {token}"}, timeout=TIMEOUT)
     r.raise_for_status()
     items = r.json().get("data", {}).get("items", [])
     if not items:
@@ -167,7 +186,14 @@ def notify(text):
 
 def main():
     debug = "--debug" in sys.argv
-    m = get_tasty_metrics(debug=debug)
+    try:
+        m = get_tasty_metrics(debug=debug)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        # transient network/reachability blip (e.g. Tastytrade slow to this runner).
+        # Don't fail the run red; just skip this slot and try again next time.
+        print(f"[skip] Tastytrade not reachable this run ({type(e).__name__}); "
+              f"no update written. Will retry on the next scheduled run.")
+        return
 
     ivp = pct(m.get("implied-volatility-percentile"))
     ivr = pct(m.get("implied-volatility-index-rank"))
