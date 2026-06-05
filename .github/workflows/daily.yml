@@ -1,10 +1,11 @@
 name: MSTR Overlay Daily Monitor
 
-# Runs every weekday at 21:30 UTC (~4:30-5:30pm New York time), after the close.
+# Auto-runs every 30 minutes during US market hours (~8:00am-4:30pm Central), Mon-Fri.
+# Times are in UTC and span both DST regimes; GitHub may delay a scheduled run a few minutes.
 # You can also run it on demand from the Actions tab (with an optional debug dump).
 on:
   schedule:
-    - cron: "30 21 * * 1-5"
+    - cron: "0,30 13-21 * * 1-5"
   workflow_dispatch:
     inputs:
       debug:
