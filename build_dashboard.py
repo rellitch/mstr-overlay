@@ -75,8 +75,8 @@ def build():
     title, color, blurb = STATE_META.get(state, STATE_META["UNKNOWN"])
 
     cards = [
-        ("IV Percentile", fnum(cur.get("iv_percentile"), 0), "primary trigger"),
-        ("VRP (IV−HV)", fnum(cur.get("vrp_iv_minus_hv"), 3), "must be > 0 to act"),
+        ("Vol Percentile", fnum(cur.get("iv_percentile"), 0), "primary trigger (RV basis)"),
+        ("VRP (IV−HV)", fnum(cur.get("vrp_iv_minus_hv"), 1), "vol points; >0 to act"),
         ("RSI(14)", fnum(cur.get("rsi14"), 0), "side selection"),
         ("Price", fnum(cur.get("close"), 2, ""), "MSTR close"),
         ("vs 50-day MA", "below" if str(cur.get("below_ma50")).lower() == "true" else "above", "calls need 'below'"),
@@ -109,14 +109,30 @@ def build():
         f"<span class='pill' style='background:{m[1]}'>{html.escape(k)}</span>"
         for k, m in STATE_META.items() if k != "UNKNOWN")
 
+    today = dt.date.today()
+    latest_date = cur.get("date", "")
+    stale_html = ""
+    try:
+        is_weekday = today.weekday() < 5
+        if latest_date and latest_date < today.isoformat() and is_weekday:
+            stale_html = (
+                "<div style='background:#b54708;color:#fff;border-radius:10px;"
+                "padding:10px 14px;margin:10px 0;font-size:13px'>"
+                f"&#9888; Heads up: the latest reading is from <b>{html.escape(latest_date)}</b>, "
+                "not today yet. If this persists during market hours, the data feed may be "
+                "failing &mdash; check the latest Actions run.</div>")
+    except Exception:
+        pass
+
     body = f"""
+      {stale_html}
       <div class='banner' style='background:{color}'>
         <div class='banner-state'>{html.escape(title)}</div>
         <div class='banner-blurb'>{html.escape(blurb)}</div>
         <div class='banner-date'>Latest reading: {html.escape(cur.get('date',''))}</div>
       </div>
       <div class='grid'>{card_html}</div>
-      <h2>IV Percentile — last 90 readings</h2>
+      <h2>Vol Percentile — last 90 readings</h2>
       <p class='muted'>Dashed lines at 50 (opportune threshold) and 80 (extreme threshold). Dot color = state that day.</p>
       {chart}
       <h2>Recent readings</h2>
