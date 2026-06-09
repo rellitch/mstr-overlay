@@ -6,12 +6,7 @@ name: MSTR Overlay Daily Monitor
 on:
   schedule:
     - cron: "0,30 13-21 * * 1-5"
-  workflow_dispatch:
-    inputs:
-      debug:
-        description: "Dump raw Tastytrade fields to the log (for first-time checks)"
-        type: boolean
-        default: false
+  workflow_dispatch: {}
 
 permissions:
   contents: write          # lets the job save the updated log + dashboard back to the repo
@@ -33,11 +28,9 @@ jobs:
 
       - name: Run monitor
         env:
-          TASTYTRADE_CLIENT_SECRET: ${{ secrets.TASTYTRADE_CLIENT_SECRET }}
-          TASTYTRADE_REFRESH_TOKEN: ${{ secrets.TASTYTRADE_REFRESH_TOKEN }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}      # optional (Discord/Slack alerts)
           BTC_HOLDINGS: ${{ secrets.BTC_HOLDINGS }}    # optional (mNAV context)
-        run: python mstr_overlay.py ${{ (github.event_name == 'workflow_dispatch' && inputs.debug) && '--debug' || '' }}
+        run: python mstr_overlay.py
 
       - name: Build dashboard
         run: python build_dashboard.py
