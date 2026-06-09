@@ -1,60 +1,38 @@
 #!/usr/bin/env python3
 """
-MSTR Opportunistic Overlay - daily monitor (Tastytrade OAuth version)
-=====================================================================
-Authenticates with Tastytrade via OAuth (client secret + refresh token), which
-is the supported method for automation and is NOT blocked by device challenges.
-Fetches market-metrics (IV percentile, IV rank, IV30, IV-HV/VRP), adds price
-indicators (RSI14, MA20, MA50), classifies the v2 state, logs one row to a CSV,
-and optionally alerts on a state change.
+MSTR Opportunistic Overlay - daily monitor (Yahoo data, no brokerage API)
+=========================================================================
+Computes everything from Yahoo (reachable from GitHub's runners), since
+Tastytrade's API blocks cloud/datacenter IPs. Signals:
+  - Vol percentile  : trailing 252-day percentile of 30-day realized vol
+                      (this is exactly the basis the backtest used)
+  - VRP             : chain-derived IV30 minus realized HV30, in vol points
+  - RSI(14), MA20, MA50 : from price
+Classifies the v2 state, logs one row per trading day (in place), and
+optionally alerts on a state change. No API keys required.
 
-Required env vars (set as GitHub secrets):
-  TASTYTRADE_CLIENT_SECRET   - from your Tastytrade OAuth application
-  TASTYTRADE_REFRESH_TOKEN   - from a "Personal OAuth Grant" on that application
-Optional:
+Optional env vars:
   WEBHOOK_URL   - Discord/Slack incoming webhook for state-change alerts
-  BTC_HOLDINGS  - Strategy's BTC count, for mNAV context
+  BTC_HOLDINGS  - Strategy's BTC count, for mNAV context (needs market cap; left blank here)
 
-Run:  python mstr_overlay.py            (normal run; auto-runs every 30 min on GitHub)
-      python mstr_overlay.py --debug    (also dumps the raw market-metrics JSON)
+Run:  python mstr_overlay.py            (normal run; auto-runs on GitHub every 30 min)
 """
 
-import os, sys, json, csv, datetime as dt
+import os, sys, csv, time, datetime as dt
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import requests
-from requests.adapters import HTTPAdapter
-try:
-    from urllib3.util.retry import Retry
-except Exception:  # pragma: no cover
-    from requests.packages.urllib3.util.retry import Retry
 
 SYMBOL = "MSTR"
 CSV_PATH = Path(__file__).parent / "mstr_overlay_log.csv"
-TT_BASE = "https://api.tastyworks.com"
-UA = {"User-Agent": "mstr-overlay/1.0", "Accept": "application/json"}
-
-
-def _make_session():
-    """requests session that auto-retries transient network/5xx errors with backoff."""
-    s = requests.Session()
-    retry = Retry(total=4, connect=4, read=4, backoff_factor=3,
-                  status_forcelist=[429, 500, 502, 503, 504],
-                  allowed_methods=frozenset(["GET", "POST"]))
-    s.mount("https://", HTTPAdapter(max_retries=retry))
-    return s
-
-
-SESSION = _make_session()
-TIMEOUT = (10, 30)  # (connect, read) seconds
 
 # ---- v2 framework thresholds (single place to tune) -------------------------
 IVP_OPP, IVP_XTREME, IVP_XCALL = 50, 80, 90
 RSI_PUT, RSI_XPUT, RSI_CALL, RSI_XCALL = 45, 30, 60, 65
-# Calls also require Close <= MA50 (trend gate). All active states need VRP > 0.
+# Calls also require Close <= MA50 (trend gate). Active states need VRP > 0 when VRP is known.
 
 DTE_BY_STATE = {
     "EXTREME_PUTS": "30-45",
@@ -67,84 +45,85 @@ DTE_BY_STATE = {
 }
 
 
-def pct(x):
-    if x in (None, ""):
-        return float("nan")
-    x = float(x)
-    return x * 100 if x <= 1.0 else x
+def get_price_frame():
+    """~2y of daily closes (enough for a 252-day percentile + the moving averages)."""
+    last_err = None
+    for _ in range(3):
+        try:
+            px = yf.download(SYMBOL, period="2y", interval="1d",
+                             auto_adjust=True, progress=False)["Close"].squeeze().dropna()
+            if len(px) > 260:
+                return px
+        except Exception as e:
+            last_err = e
+        time.sleep(5)
+    raise ConnectionError(f"price data unavailable: {last_err}")
 
 
-def fnum(x):
+def chain_iv30(spot):
+    """Best-effort constant-maturity 30-day ATM IV (percent) from the Yahoo chain; NaN if unavailable."""
     try:
-        return float(x)
-    except (TypeError, ValueError):
+        t = yf.Ticker(SYMBOL)
+        now = pd.Timestamp.now("UTC").tz_localize(None)
+        rows = []
+        for e in t.options:
+            dte = (pd.Timestamp(e) - now).days
+            if 7 <= dte <= 80:
+                ch = t.option_chain(e)
+                df = pd.concat([ch.calls, ch.puts])
+                df = df[(df["impliedVolatility"] > 0.01) & (df["impliedVolatility"] < 5)]
+                if len(df) < 3:
+                    continue
+                df = df.assign(d=(df["strike"] - spot).abs())
+                rows.append((dte, float(np.average(df.nsmallest(6, "d")["impliedVolatility"]))))
+        if len(rows) < 2:
+            return float("nan")
+        r = pd.DataFrame(rows, columns=["dte", "iv"]).sort_values("dte")
+        below, above = r[r.dte <= 30], r[r.dte >= 30]
+        if len(below) and len(above):
+            lo, hi = below.iloc[-1], above.iloc[0]
+            w = 0 if hi.dte == lo.dte else (30 - lo.dte) / (hi.dte - lo.dte)
+            iv = lo.iv + w * (hi.iv - lo.iv)
+        else:
+            iv = r.iloc[(r.dte - 30).abs().argmin()].iv
+        return float(iv * 100)
+    except Exception:
         return float("nan")
 
 
-def get_access_token():
-    secret = os.environ["TASTYTRADE_CLIENT_SECRET"]
-    refresh = os.environ["TASTYTRADE_REFRESH_TOKEN"]
-    r = SESSION.post(f"{TT_BASE}/oauth/token",
-                     json={"grant_type": "refresh_token",
-                           "refresh_token": refresh,
-                           "client_secret": secret},
-                     headers={**UA, "Content-Type": "application/json"}, timeout=TIMEOUT)
-    if r.status_code >= 400:
-        raise SystemExit(f"Tastytrade OAuth token request failed (HTTP {r.status_code}). "
-                         f"Check the TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN secrets. "
-                         f"Body: {r.text[:300]}")
-    return r.json()["access_token"]
+def compute_metrics():
+    px = get_price_frame()
+    ret = np.log(px).diff()
+    rv30_series = ret.rolling(30).std() * np.sqrt(252) * 100          # percent
+    rv30 = float(rv30_series.iloc[-1])
+    # trailing 252-day percentile of RV30 (the backtest's trigger basis)
+    win = rv30_series.dropna().tail(252)
+    ivp = float((win.iloc[:-1] < win.iloc[-1]).mean() * 100) if len(win) > 30 else float("nan")
 
-
-def get_tasty_metrics(debug=False):
-    token = get_access_token()
-    r = SESSION.get(f"{TT_BASE}/market-metrics",
-                    params={"symbols": SYMBOL},
-                    headers={**UA, "Authorization": f"Bearer {token}"}, timeout=TIMEOUT)
-    r.raise_for_status()
-    items = r.json().get("data", {}).get("items", [])
-    if not items:
-        raise SystemExit("No market-metrics returned for MSTR.")
-    m = items[0]
-    if debug:
-        print("=== RAW Tastytrade market-metrics for", SYMBOL, "===")
-        print(json.dumps(m, indent=2))
-    return m
-
-
-def get_price_indicators():
-    px = yf.download(SYMBOL, period="200d", interval="1d",
-                     auto_adjust=True, progress=False)["Close"].squeeze().dropna()
     delta = px.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rsi = (100 - 100/(1+(avg_gain/avg_loss))).iloc[-1]
-    ma20 = px.rolling(20).mean().iloc[-1]
-    ma50 = px.rolling(50).mean().iloc[-1]
-    last = px.iloc[-1]
-    return dict(close=float(last), rsi=float(rsi), ma20=float(ma20), ma50=float(ma50),
-                dist_ma20=float(last/ma20-1)*100, below_ma50=bool(last <= ma50))
+    ag = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    al = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rsi = float((100 - 100/(1+(ag/al))).iloc[-1])
+    ma20 = float(px.rolling(20).mean().iloc[-1])
+    ma50 = float(px.rolling(50).mean().iloc[-1])
+    last = float(px.iloc[-1])
 
+    iv30 = chain_iv30(last)
+    vrp = (iv30 - rv30) if not np.isnan(iv30) else float("nan")        # vol points
 
-def mnav_context(market_cap):
-    holdings = os.environ.get("BTC_HOLDINGS")
-    if not holdings or not market_cap:
-        return None
-    try:
-        btc = yf.download("BTC-USD", period="2d", interval="1d",
-                          auto_adjust=True, progress=False)["Close"].squeeze().dropna().iloc[-1]
-        nav = float(holdings) * float(btc)
-        return float(market_cap) / nav if nav else None
-    except Exception:
-        return None
+    return dict(close=last, rsi=rsi, ma20=ma20, ma50=ma50,
+                dist_ma20=(last/ma20-1)*100, below_ma50=bool(last <= ma50),
+                rv30=rv30, iv30=iv30, vrp=vrp, ivp=ivp)
 
 
 def classify(ivp, vrp, rsi, below_ma50):
     if np.isnan(ivp) or np.isnan(rsi):
         return "UNKNOWN"
-    if ivp < IVP_OPP or vrp <= 0:
+    if ivp < IVP_OPP:
+        return "NEUTRAL"
+    if (not np.isnan(vrp)) and vrp <= 0:     # known negative VRP -> stand down
         return "NEUTRAL"
     if ivp >= IVP_XTREME and rsi <= RSI_XPUT:
         return "EXTREME_PUTS"
@@ -185,58 +164,43 @@ def notify(text):
 
 
 def main():
-    debug = "--debug" in sys.argv
     try:
-        m = get_tasty_metrics(debug=debug)
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-        # transient network/reachability blip (e.g. Tastytrade slow to this runner).
-        # Don't fail the run red; just skip this slot and try again next time.
-        print(f"[skip] Tastytrade not reachable this run ({type(e).__name__}); "
-              f"no update written. Will retry on the next scheduled run.")
+        m = compute_metrics()
+    except Exception as e:
+        # Could not get price data this run; skip without crashing. The dashboard's
+        # staleness banner makes any freeze visible, so this won't masquerade as live.
+        print(f"[skip] market data unavailable this run ({type(e).__name__}: {e}); no update written.")
         return
 
-    ivp = pct(m.get("implied-volatility-percentile"))
-    ivr = pct(m.get("implied-volatility-index-rank"))
-    iv30 = fnum(m.get("implied-volatility-30-day"))
-    hv30 = fnum(m.get("historical-volatility-30-day"))
-    vrp = fnum(m.get("iv-hv-30-day-difference"))
-    beta = fnum(m.get("beta"))
-    mcap = fnum(m.get("market-cap"))
-
-    p = get_price_indicators()
-    mnav = mnav_context(mcap if not np.isnan(mcap) else None)
-    state = classify(ivp, vrp, p["rsi"], p["below_ma50"])
-
+    state = classify(m["ivp"], m["vrp"], m["rsi"], m["below_ma50"])
     row = {
         "date": dt.date.today().isoformat(),
         "state": state,
         "dte_reco": DTE_BY_STATE.get(state, "-"),
-        "iv_percentile": round(ivp, 1) if not np.isnan(ivp) else "",
-        "iv_rank": round(ivr, 1) if not np.isnan(ivr) else "",
-        "iv30": round(iv30, 4) if not np.isnan(iv30) else "",
-        "hv30": round(hv30, 4) if not np.isnan(hv30) else "",
-        "vrp_iv_minus_hv": round(vrp, 4) if not np.isnan(vrp) else "",
-        "close": round(p["close"], 2),
-        "rsi14": round(p["rsi"], 1),
-        "ma20": round(p["ma20"], 2),
-        "ma50": round(p["ma50"], 2),
-        "dist_ma20_pct": round(p["dist_ma20"], 1),
-        "below_ma50": p["below_ma50"],
-        "beta": round(beta, 2) if not np.isnan(beta) else "",
-        "mnav": round(mnav, 3) if mnav else "",
+        "iv_percentile": round(m["ivp"], 1) if not np.isnan(m["ivp"]) else "",
+        "vrp_iv_minus_hv": round(m["vrp"], 1) if not np.isnan(m["vrp"]) else "",
+        "iv30": round(m["iv30"], 1) if not np.isnan(m["iv30"]) else "",
+        "hv30": round(m["rv30"], 1),
+        "close": round(m["close"], 2),
+        "rsi14": round(m["rsi"], 1),
+        "ma20": round(m["ma20"], 2),
+        "ma50": round(m["ma50"], 2),
+        "dist_ma20_pct": round(m["dist_ma20"], 1),
+        "below_ma50": m["below_ma50"],
+        "mnav": "",
     }
 
     rows = load_rows()
     prev = rows[-1]["state"] if rows else None
     if rows and rows[-1].get("date") == row["date"]:
-        rows[-1] = row              # same day -> update in place (keeps one row per day)
+        rows[-1] = row
     else:
-        rows.append(row)            # new day -> add a row
+        rows.append(row)
     save_rows(rows, list(row.keys()))
 
     line = (f"{row['date']}  MSTR ${row['close']}  STATE={state}  "
-            f"IVP={row['iv_percentile']}  VRP={row['vrp_iv_minus_hv']}  "
-            f"RSI={row['rsi14']}  vs50dMA={'below' if p['below_ma50'] else 'above'}  "
+            f"VolPct={row['iv_percentile']}  VRP={row['vrp_iv_minus_hv']}  "
+            f"RSI={row['rsi14']}  vs50dMA={'below' if m['below_ma50'] else 'above'}  "
             f"DTE={row['dte_reco']}")
     print(line)
 
