@@ -118,6 +118,20 @@ def compute_metrics():
                 rv30=rv30, iv30=iv30, vrp=vrp, ivp=ivp)
 
 
+def strategy_mnav():
+    """Official mNAV from Strategy's own site API: EV / BTC NAV. Returns (mnav, btc_price) or (None, None)."""
+    try:
+        h = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+        kpi = requests.get("https://api.strategy.com/btc/mstrKpiData", headers=h, timeout=20).json()
+        btc = requests.get("https://api.strategy.com/btc/bitcoinKpis", headers=h, timeout=20).json()
+        ev = float(str(kpi[0]["entVal"]).replace(",", ""))
+        nav = float(btc["results"]["btcNavNumber"])
+        btc_px = float(btc["results"]["ufPrice"])
+        return (ev / nav if nav else None), btc_px
+    except Exception:
+        return None, None
+
+
 def classify(ivp, vrp, rsi, below_ma50):
     if np.isnan(ivp) or np.isnan(rsi):
         return "UNKNOWN"
@@ -173,6 +187,7 @@ def main():
         return
 
     state = classify(m["ivp"], m["vrp"], m["rsi"], m["below_ma50"])
+    mnav, btc_px = strategy_mnav()
     row = {
         "date": dt.date.today().isoformat(),
         "state": state,
@@ -187,7 +202,8 @@ def main():
         "ma50": round(m["ma50"], 2),
         "dist_ma20_pct": round(m["dist_ma20"], 1),
         "below_ma50": m["below_ma50"],
-        "mnav": "",
+        "mnav": round(mnav, 3) if mnav else "",
+        "btc_price": round(btc_px, 0) if btc_px else "",
     }
 
     rows = load_rows()
