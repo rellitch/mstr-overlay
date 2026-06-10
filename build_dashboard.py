@@ -82,7 +82,7 @@ def build():
         ("vs 50-day MA", "below" if str(cur.get("below_ma50")).lower() == "true" else "above", "calls need 'below'"),
         ("IV30 / HV30", f"{fnum(cur.get('iv30'),0)} / {fnum(cur.get('hv30'),0)}", "implied vs realized"),
         ("DTE to sell", html.escape(str(cur.get("dte_reco", "—"))), "recommended tenor"),
-        ("mNAV", fnum(cur.get("mnav"), 3) if cur.get("mnav") not in (None, "", "—") else "—", "context (optional)"),
+        ("mNAV", fnum(cur.get("mnav"), 2) if cur.get("mnav") not in (None, "", "—") else "—", "official (EV / BTC NAV)"),
     ]
     card_html = "".join(
         f"<div class='card'><div class='k'>{html.escape(k)}</div>"
