@@ -5,7 +5,7 @@ name: MSTR Overlay Daily Monitor
 # You can also run it on demand from the Actions tab (with an optional debug dump).
 on:
   schedule:
-    - cron: "0,30 13-21 * * 1-5"
+    - cron: "7,37 13-21 * * 1-5"
   workflow_dispatch: {}
 
 permissions:
