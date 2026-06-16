@@ -15,7 +15,9 @@ Optional env vars:
   WEBHOOK_URL   - Discord/Slack incoming webhook for state-change alerts
   BTC_HOLDINGS  - Strategy's BTC count, for mNAV context (needs market cap; left blank here)
 
-Run:  python mstr_overlay.py            (normal run; auto-runs on GitHub every 30 min)
+Run:  python mstr_overlay.py            (normal run; on GitHub the cron is best-effort
+                                         and is often delayed/skipped, especially at the
+                                         US open — force a run from the Actions tab when needed)
 """
 
 import os, sys, csv, time, datetime as dt

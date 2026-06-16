@@ -1,12 +1,22 @@
 name: MSTR Overlay Daily Monitor
 
-# Auto-runs every 30 minutes during US market hours (~8:00am-4:30pm Central), Mon-Fri.
-# Times are in UTC and span both DST regimes; GitHub may delay a scheduled run a few minutes.
-# You can also run it on demand from the Actions tab (with an optional debug dump).
+# Scheduled (cron) runs are BEST-EFFORT only. GitHub frequently delays or SKIPS
+# scheduled jobs during high-load periods (notably the US market open), so this cron
+# is a backup, not a guarantee of timely updates. The cron below *attempts* a run
+# roughly half-hourly during market hours (UTC; the hour range spans both DST regimes),
+# but in practice many of those attempts never fire. When the dashboard shows its
+# staleness banner, force an immediate run from the Actions tab ("Run workflow").
 on:
   schedule:
     - cron: "7,37 13-21 * * 1-5"
   workflow_dispatch: {}
+
+# Serialize runs: if a delayed cron lands while a manual run is still going (or vice
+# versa), queue the newer one instead of racing. Prevents two jobs colliding on the
+# `git push` below (non-fast-forward). Don't cancel the in-flight run mid-write.
+concurrency:
+  group: mstr-overlay-log
+  cancel-in-progress: false
 
 permissions:
   contents: write          # lets the job save the updated log + dashboard back to the repo

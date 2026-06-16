@@ -119,8 +119,11 @@ def build():
                 "<div style='background:#b54708;color:#fff;border-radius:10px;"
                 "padding:10px 14px;margin:10px 0;font-size:13px'>"
                 f"&#9888; Heads up: the latest reading is from <b>{html.escape(latest_date)}</b>, "
-                "not today yet. If this persists during market hours, the data feed may be "
-                "failing &mdash; check the latest Actions run.</div>")
+                "not today yet. Scheduled (cron) runs are best-effort and GitHub often delays or "
+                "skips them &mdash; especially around the US open &mdash; so this is expected from "
+                "time to time. For an immediate update, force a run from the Actions tab "
+                "(“Run workflow”). If a run did fire but nothing changed, check the latest "
+                "Actions log for a data-fetch skip.</div>")
     except Exception:
         pass
 
