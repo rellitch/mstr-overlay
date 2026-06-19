@@ -6,9 +6,25 @@ Run after mstr_overlay.py:  python build_dashboard.py
 """
 import csv, json, html, datetime as dt
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 CSV_PATH = Path(__file__).parent / "mstr_overlay_log.csv"
 OUT_PATH = Path(__file__).parent / "index.html"
+
+
+def last_completed_session():
+    """Date of the most recent fully-closed US session (ET), weekend-aware. Holidays are
+    not modeled, so on a holiday this may name the would-be session and show a harmless
+    'stale' banner. Used only to decide whether the staleness banner appears. Readings are
+    EOD-anchored to the last completed session, so the banner should compare against this
+    (not wall-clock 'today'), or it would cry stale all day during the live session."""
+    et = dt.datetime.now(ZoneInfo("America/New_York"))
+    d = et.date()
+    if et.time() < dt.time(16, 15):     # today's session not closed yet
+        d -= dt.timedelta(days=1)
+    while d.weekday() >= 5:              # back off Sat/Sun to Friday
+        d -= dt.timedelta(days=1)
+    return d
 
 STATE_META = {
     "EXTREME_PUTS":       ("Extremely opportune — SELL PUTS", "#0f7a3d", "Highest-conviction put window (IVP≥80, capitulation)."),
@@ -66,7 +82,7 @@ def build():
     now = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     if not rows:
         body = "<p>No readings logged yet. Run the monitor once, then rebuild.</p>"
-        OUT_PATH.write_text(PAGE.format(updated=now, body=body))
+        OUT_PATH.write_text(PAGE.format(updated=now, body=body), encoding="utf-8")
         print("Wrote", OUT_PATH, "(empty log)")
         return
 
@@ -75,8 +91,8 @@ def build():
     title, color, blurb = STATE_META.get(state, STATE_META["UNKNOWN"])
 
     cards = [
-        ("Vol Percentile", fnum(cur.get("iv_percentile"), 0), "primary trigger (RV basis)"),
-        ("VRP (IV−HV)", fnum(cur.get("vrp_iv_minus_hv"), 1), "vol points; >0 to act"),
+        ("Vol Percentile", fnum(cur.get("iv_percentile"), 1), "primary trigger (RV basis)"),
+        ("VRP (IV−HV)", fnum(cur.get("vrp_iv_minus_hv"), 1), "vol points; act unless < −2"),
         ("RSI(14)", fnum(cur.get("rsi14"), 0), "side selection"),
         ("Price", fnum(cur.get("close"), 2, ""), "MSTR close"),
         ("vs 50-day MA", "below" if str(cur.get("below_ma50")).lower() == "true" else "above", "calls need 'below'"),
@@ -109,21 +125,20 @@ def build():
         f"<span class='pill' style='background:{m[1]}'>{html.escape(k)}</span>"
         for k, m in STATE_META.items() if k != "UNKNOWN")
 
-    today = dt.date.today()
+    expected = last_completed_session().isoformat()
     latest_date = cur.get("date", "")
     stale_html = ""
     try:
-        is_weekday = today.weekday() < 5
-        if latest_date and latest_date < today.isoformat() and is_weekday:
+        if latest_date and latest_date < expected:
             stale_html = (
                 "<div style='background:#b54708;color:#fff;border-radius:10px;"
                 "padding:10px 14px;margin:10px 0;font-size:13px'>"
                 f"&#9888; Heads up: the latest reading is from <b>{html.escape(latest_date)}</b>, "
-                "not today yet. Scheduled (cron) runs are best-effort and GitHub often delays or "
-                "skips them &mdash; especially around the US open &mdash; so this is expected from "
-                "time to time. For an immediate update, force a run from the Actions tab "
-                "(“Run workflow”). If a run did fire but nothing changed, check the latest "
-                "Actions log for a data-fetch skip.</div>")
+                f"behind the last completed session (<b>{html.escape(expected)}</b>). Scheduled "
+                "(cron) runs are best-effort and GitHub often delays or skips them &mdash; "
+                "especially around the US open &mdash; so this is expected from time to time. For "
+                "an immediate update, force a run from the Actions tab (“Run workflow”). If a run "
+                "did fire but nothing changed, check the latest Actions log for a data-fetch skip.</div>")
     except Exception:
         pass
 
@@ -144,7 +159,7 @@ def build():
       <p class='muted'>This is a volatility/price-timing signal only. It does not size positions or place trades,
       and it is blind to fundamental shocks — your own monitoring sits above it.</p>
     """
-    OUT_PATH.write_text(PAGE.format(updated=now, body=body))
+    OUT_PATH.write_text(PAGE.format(updated=now, body=body), encoding="utf-8")
     print("Wrote", OUT_PATH, "| current state:", state)
 
 PAGE = """<!doctype html><html lang='en'><head><meta charset='utf-8'>

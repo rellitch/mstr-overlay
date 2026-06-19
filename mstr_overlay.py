@@ -22,6 +22,7 @@ Run:  python mstr_overlay.py            (normal run; on GitHub the cron is best-
 
 import os, sys, csv, time, datetime as dt
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -34,7 +35,11 @@ CSV_PATH = Path(__file__).parent / "mstr_overlay_log.csv"
 # ---- v2 framework thresholds (single place to tune) -------------------------
 IVP_OPP, IVP_XTREME, IVP_XCALL = 50, 80, 90
 RSI_PUT, RSI_XPUT, RSI_CALL, RSI_XCALL = 45, 30, 60, 65
-# Calls also require Close <= MA50 (trend gate). Active states need VRP > 0 when VRP is known.
+VRP_DEADBAND = -2.0   # vol points. Ignore small negative VRP within the deadband of 0 to
+                      # avoid daily on/off chatter at the zero line; stand down only below this.
+# Calls also require Close <= MA50 (trend gate). Active states need VRP > VRP_DEADBAND when known.
+
+ET = ZoneInfo("America/New_York")   # for end-of-day (last completed session) anchoring
 
 DTE_BY_STATE = {
     "EXTREME_PUTS": "30-45",
@@ -95,12 +100,27 @@ def chain_iv30(spot):
 
 def compute_metrics():
     px = get_price_frame()
+    # EOD anchoring: if the latest daily bar is *today* (ET) and the regular session
+    # hasn't closed yet (~16:15 ET buffer), it's a live/partial bar -> drop it so every
+    # run computes on the last COMPLETED session. Makes the stored value canonical
+    # (reproducible from daily closes) and immune to intraday run timing.
+    if px.index[-1].date() == dt.datetime.now(ET).date() and dt.datetime.now(ET).time() < dt.time(16, 15):
+        px = px.iloc[:-1]
+    session_date = px.index[-1].date().isoformat()
+
     ret = np.log(px).diff()
     rv30_series = ret.rolling(30).std() * np.sqrt(252) * 100          # percent
     rv30 = float(rv30_series.iloc[-1])
-    # trailing 252-day percentile of RV30 (the backtest's trigger basis)
+    # Trailing 252-day percentile of RV30 (the backtest's trigger basis), via linear
+    # interpolation of the empirical CDF rather than a raw count/251. The discrete count
+    # snapped to ~0.4% steps and looked "frozen" in flat-vol stretches; interpolation lets
+    # it vary smoothly with small RV30 moves. Same logic, just finer resolution.
     win = rv30_series.dropna().tail(252)
-    ivp = float((win.iloc[:-1] < win.iloc[-1]).mean() * 100) if len(win) > 30 else float("nan")
+    if len(win) > 30:
+        prior = np.sort(win.iloc[:-1].to_numpy())
+        ivp = float(np.interp(win.iloc[-1], prior, np.linspace(0, 100, len(prior))))
+    else:
+        ivp = float("nan")
 
     delta = px.diff()
     gain = delta.clip(lower=0)
@@ -117,7 +137,7 @@ def compute_metrics():
 
     return dict(close=last, rsi=rsi, ma20=ma20, ma50=ma50,
                 dist_ma20=(last/ma20-1)*100, below_ma50=bool(last <= ma50),
-                rv30=rv30, iv30=iv30, vrp=vrp, ivp=ivp)
+                rv30=rv30, iv30=iv30, vrp=vrp, ivp=ivp, session_date=session_date)
 
 
 def strategy_mnav():
@@ -139,7 +159,7 @@ def classify(ivp, vrp, rsi, below_ma50):
         return "UNKNOWN"
     if ivp < IVP_OPP:
         return "NEUTRAL"
-    if (not np.isnan(vrp)) and vrp <= 0:     # known negative VRP -> stand down
+    if (not np.isnan(vrp)) and vrp <= VRP_DEADBAND:   # clearly negative VRP -> stand down
         return "NEUTRAL"
     if ivp >= IVP_XTREME and rsi <= RSI_XPUT:
         return "EXTREME_PUTS"
@@ -191,7 +211,7 @@ def main():
     state = classify(m["ivp"], m["vrp"], m["rsi"], m["below_ma50"])
     mnav, btc_px = strategy_mnav()
     row = {
-        "date": dt.date.today().isoformat(),
+        "date": m["session_date"],          # last completed session (EOD-anchored), not wall-clock today
         "state": state,
         "dte_reco": DTE_BY_STATE.get(state, "-"),
         "iv_percentile": round(m["ivp"], 1) if not np.isnan(m["ivp"]) else "",
