@@ -10,6 +10,14 @@ from zoneinfo import ZoneInfo
 
 CSV_PATH = Path(__file__).parent / "mstr_overlay_log.csv"
 OUT_PATH = Path(__file__).parent / "index.html"
+SNAP_PATH = Path(__file__).parent / "live_snapshot.json"
+
+
+def load_snapshot():
+    try:
+        return json.loads(SNAP_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def last_completed_session():
@@ -35,6 +43,31 @@ STATE_META = {
     "NEUTRAL":            ("Neutral — do nothing opportunistic","#6b7280", "Low IV or no vol premium. The mechanical wheel runs as usual."),
     "UNKNOWN":            ("Unknown — data issue",             "#9ca3af", "A metric was missing on this run. Check the latest Action log."),
 }
+
+def live_panel(snap):
+    """Provisional intraday read, shown only while a session is in progress. The confirmed
+    end-of-day signal is the banner below; this box is the developing live read so an
+    intraday decision isn't made off a stale prior close."""
+    if not snap or not snap.get("provisional"):
+        return ""   # session closed (or no snapshot) -> the confirmed banner below is current
+    st = snap.get("state", "UNKNOWN")
+    color = STATE_META.get(st, STATE_META["UNKNOWN"])[1]
+    def s(v): return html.escape("—" if v in (None, "") else str(v))
+    below = str(snap.get("below_ma50")).lower() == "true"
+    return (
+        f"<div style='border:2px dashed {color};border-radius:14px;padding:14px 16px;margin:10px 0 4px;background:#fff'>"
+        f"<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap'>"
+        f"<span class='pill' style='background:{color}'>LIVE · {s(st)}</span>"
+        f"<span style='font-size:12px;color:#b54708;font-weight:600'>PROVISIONAL — session in progress, not final until the close</span>"
+        f"</div>"
+        f"<div style='font-size:13px;color:#475467;margin-top:8px'>"
+        f"VolPct <b>{s(snap.get('iv_percentile'))}</b> &middot; VRP <b>{s(snap.get('vrp_iv_minus_hv'))}</b> &middot; "
+        f"RSI <b>{s(snap.get('rsi14'))}</b> &middot; {'below' if below else 'above'} MA50 &middot; "
+        f"close <b>{s(snap.get('close'))}</b> &middot; IV30/HV30 {s(snap.get('iv30'))}/{s(snap.get('hv30'))}</div>"
+        f"<div style='font-size:11px;color:#98a2b3;margin-top:6px'>"
+        f"Live read for session {s(snap.get('asof'))} &middot; generated {s(snap.get('generated_utc'))}. "
+        f"Updates only when a monitor run fires (cron is best-effort) &mdash; force a run for the freshest read.</div>"
+        f"</div>")
 
 def load_rows():
     if not CSV_PATH.exists():
@@ -144,10 +177,11 @@ def build():
 
     body = f"""
       {stale_html}
+      {live_panel(load_snapshot())}
       <div class='banner' style='background:{color}'>
         <div class='banner-state'>{html.escape(title)}</div>
         <div class='banner-blurb'>{html.escape(blurb)}</div>
-        <div class='banner-date'>Latest reading: {html.escape(cur.get('date',''))}</div>
+        <div class='banner-date'>Confirmed signal &mdash; last completed session: {html.escape(cur.get('date',''))}</div>
       </div>
       <div class='grid'>{card_html}</div>
       <h2>Vol Percentile — last 90 readings</h2>

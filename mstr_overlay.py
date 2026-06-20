@@ -20,7 +20,7 @@ Run:  python mstr_overlay.py            (normal run; on GitHub the cron is best-
                                          US open — force a run from the Actions tab when needed)
 """
 
-import os, sys, csv, time, datetime as dt
+import os, sys, csv, json, time, datetime as dt
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -31,6 +31,7 @@ import requests
 
 SYMBOL = "MSTR"
 CSV_PATH = Path(__file__).parent / "mstr_overlay_log.csv"
+SNAP_PATH = Path(__file__).parent / "live_snapshot.json"   # provisional intraday read for the dashboard
 
 # ---- v2 framework thresholds (single place to tune) -------------------------
 IVP_OPP, IVP_XTREME, IVP_XCALL = 50, 80, 90
@@ -98,16 +99,8 @@ def chain_iv30(spot):
         return float("nan")
 
 
-def compute_metrics():
-    px = get_price_frame()
-    # EOD anchoring: if the latest daily bar is *today* (ET) and the regular session
-    # hasn't closed yet (~16:15 ET buffer), it's a live/partial bar -> drop it so every
-    # run computes on the last COMPLETED session. Makes the stored value canonical
-    # (reproducible from daily closes) and immune to intraday run timing.
-    if px.index[-1].date() == dt.datetime.now(ET).date() and dt.datetime.now(ET).time() < dt.time(16, 15):
-        px = px.iloc[:-1]
-    session_date = px.index[-1].date().isoformat()
-
+def _frame_metrics(px):
+    """Price-derived metrics from a daily close series (no chain/mNAV)."""
     ret = np.log(px).diff()
     rv30_series = ret.rolling(30).std() * np.sqrt(252) * 100          # percent
     rv30 = float(rv30_series.iloc[-1])
@@ -131,13 +124,34 @@ def compute_metrics():
     ma20 = float(px.rolling(20).mean().iloc[-1])
     ma50 = float(px.rolling(50).mean().iloc[-1])
     last = float(px.iloc[-1])
-
-    iv30 = chain_iv30(last)
-    vrp = (iv30 - rv30) if not np.isnan(iv30) else float("nan")        # vol points
-
     return dict(close=last, rsi=rsi, ma20=ma20, ma50=ma50,
                 dist_ma20=(last/ma20-1)*100, below_ma50=bool(last <= ma50),
-                rv30=rv30, iv30=iv30, vrp=vrp, ivp=ivp, session_date=session_date)
+                rv30=rv30, ivp=ivp, asof=px.index[-1].date().isoformat())
+
+
+def _attach_iv(m, iv30):
+    m = dict(m)
+    m["iv30"] = iv30
+    m["vrp"] = (iv30 - m["rv30"]) if not np.isnan(iv30) else float("nan")   # vol points
+    return m
+
+
+def compute_metrics():
+    """Compute BOTH anchors in one shot, sharing a single chain pull:
+      eod  = last COMPLETED session -> canonical, written to the log (reproducible,
+             backtest-consistent, immune to intraday run timing).
+      live = includes today's in-progress bar -> provisional intraday read for the
+             dashboard, so an intraday decision isn't made off a stale prior close.
+    If the regular session is already closed (or there is no live bar today, e.g. a
+    holiday/weekend), `live` is `eod` and `partial` is False. Returns (eod, live, partial)."""
+    full = get_price_frame()
+    now = dt.datetime.now(ET)
+    partial = (full.index[-1].date() == now.date()) and (now.time() < dt.time(16, 15))
+    eod_px = full.iloc[:-1] if partial else full
+    iv30 = chain_iv30(float(full.iloc[-1]))            # current chain (one network call, shared)
+    eod = _attach_iv(_frame_metrics(eod_px), iv30)
+    live = _attach_iv(_frame_metrics(full), iv30) if partial else eod
+    return eod, live, partial
 
 
 def strategy_mnav():
@@ -201,29 +215,30 @@ def notify(text):
 
 def main():
     try:
-        m = compute_metrics()
+        eod, live, partial = compute_metrics()
     except Exception as e:
         # Could not get price data this run; skip without crashing. The dashboard's
         # staleness banner makes any freeze visible, so this won't masquerade as live.
         print(f"[skip] market data unavailable this run ({type(e).__name__}: {e}); no update written.")
         return
 
-    state = classify(m["ivp"], m["vrp"], m["rsi"], m["below_ma50"])
+    # --- canonical end-of-day row (written to the log; one per completed session) ---
+    state = classify(eod["ivp"], eod["vrp"], eod["rsi"], eod["below_ma50"])
     mnav, btc_px = strategy_mnav()
     row = {
-        "date": m["session_date"],          # last completed session (EOD-anchored), not wall-clock today
+        "date": eod["asof"],                # last completed session (EOD-anchored), not wall-clock today
         "state": state,
         "dte_reco": DTE_BY_STATE.get(state, "-"),
-        "iv_percentile": round(m["ivp"], 1) if not np.isnan(m["ivp"]) else "",
-        "vrp_iv_minus_hv": round(m["vrp"], 1) if not np.isnan(m["vrp"]) else "",
-        "iv30": round(m["iv30"], 1) if not np.isnan(m["iv30"]) else "",
-        "hv30": round(m["rv30"], 1),
-        "close": round(m["close"], 2),
-        "rsi14": round(m["rsi"], 1),
-        "ma20": round(m["ma20"], 2),
-        "ma50": round(m["ma50"], 2),
-        "dist_ma20_pct": round(m["dist_ma20"], 1),
-        "below_ma50": m["below_ma50"],
+        "iv_percentile": round(eod["ivp"], 1) if not np.isnan(eod["ivp"]) else "",
+        "vrp_iv_minus_hv": round(eod["vrp"], 1) if not np.isnan(eod["vrp"]) else "",
+        "iv30": round(eod["iv30"], 1) if not np.isnan(eod["iv30"]) else "",
+        "hv30": round(eod["rv30"], 1),
+        "close": round(eod["close"], 2),
+        "rsi14": round(eod["rsi"], 1),
+        "ma20": round(eod["ma20"], 2),
+        "ma50": round(eod["ma50"], 2),
+        "dist_ma20_pct": round(eod["dist_ma20"], 1),
+        "below_ma50": eod["below_ma50"],
         "mnav": round(mnav, 3) if mnav else "",
         "btc_price": round(btc_px, 0) if btc_px else "",
     }
@@ -231,17 +246,49 @@ def main():
     rows = load_rows()
     prev = rows[-1]["state"] if rows else None
     if rows and rows[-1].get("date") == row["date"]:
+        # Same completed session already has a row. Price/vol fields are reproducible, but
+        # IV30/VRP/mNAV/BTC come from the *live* chain; once the session has closed, freeze
+        # those at their first post-close values so weekend/holiday re-runs don't quietly
+        # revise a historical row with a newer chain read.
+        if not partial:
+            for k in ("iv30", "vrp_iv_minus_hv", "mnav", "btc_price"):
+                if rows[-1].get(k) not in (None, ""):
+                    row[k] = rows[-1][k]
         rows[-1] = row
     else:
         rows.append(row)
     save_rows(rows, list(row.keys()))
 
+    # --- provisional intraday snapshot (for the dashboard; NOT in the canonical log) ---
+    # During a live session this reflects today's developing conditions so an intraday
+    # decision isn't made off a stale prior close. After the close it equals the EOD row.
+    live_state = classify(live["ivp"], live["vrp"], live["rsi"], live["below_ma50"])
+    snap = {
+        "generated_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "provisional": bool(partial),
+        "asof": live["asof"],
+        "state": live_state,
+        "dte_reco": DTE_BY_STATE.get(live_state, "-"),
+        "iv_percentile": round(live["ivp"], 1) if not np.isnan(live["ivp"]) else None,
+        "vrp_iv_minus_hv": round(live["vrp"], 1) if not np.isnan(live["vrp"]) else None,
+        "iv30": round(live["iv30"], 1) if not np.isnan(live["iv30"]) else None,
+        "hv30": round(live["rv30"], 1),
+        "close": round(live["close"], 2),
+        "rsi14": round(live["rsi"], 1),
+        "below_ma50": live["below_ma50"],
+    }
+    SNAP_PATH.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+
     line = (f"{row['date']}  MSTR ${row['close']}  STATE={state}  "
             f"VolPct={row['iv_percentile']}  VRP={row['vrp_iv_minus_hv']}  "
-            f"RSI={row['rsi14']}  vs50dMA={'below' if m['below_ma50'] else 'above'}  "
+            f"RSI={row['rsi14']}  vs50dMA={'below' if eod['below_ma50'] else 'above'}  "
             f"DTE={row['dte_reco']}")
     print(line)
+    if partial:
+        print(f"[live] provisional {live_state}  VolPct={snap['iv_percentile']} "
+              f"VRP={snap['vrp_iv_minus_hv']} RSI={snap['rsi14']} close={snap['close']}")
 
+    # Alerts fire on canonical (session-to-session) state changes only -> no intraday flapping.
     if prev is not None and prev != state and state != "UNKNOWN":
         notify(f"MSTR overlay STATE CHANGE: {prev} -> {state}\n{line}")
         print(f"[ALERT] state changed: {prev} -> {state}")
