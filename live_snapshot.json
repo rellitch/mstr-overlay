@@ -1,14 +1,14 @@
 {
-  "generated_utc": "2026-06-30 18:07 UTC",
-  "provisional": true,
+  "generated_utc": "2026-06-30 20:16 UTC",
+  "provisional": false,
   "asof": "2026-06-30",
-  "state": "EXTREME_PUTS",
-  "dte_reco": "30-45",
+  "state": "OPPORTUNE_PUTS",
+  "dte_reco": "30-38",
   "iv_percentile": 88.0,
-  "vrp_iv_minus_hv": 10.9,
-  "iv30": 96.7,
-  "hv30": 85.8,
-  "close": 84.87,
-  "rsi14": 29.6,
+  "vrp_iv_minus_hv": 9.9,
+  "iv30": 94.5,
+  "hv30": 84.6,
+  "close": 86.93,
+  "rsi14": 30.3,
   "below_ma50": true
 }
