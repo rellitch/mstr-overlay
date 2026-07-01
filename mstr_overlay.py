@@ -246,14 +246,21 @@ def main():
     rows = load_rows()
     prev = rows[-1]["state"] if rows else None
     if rows and rows[-1].get("date") == row["date"]:
-        # Same completed session already has a row. Price/vol fields are reproducible, but
-        # IV30/VRP/mNAV/BTC come from the *live* chain; once the session has closed, freeze
-        # those at their first post-close values so weekend/holiday re-runs don't quietly
-        # revise a historical row with a newer chain read.
-        if not partial:
-            for k in ("iv30", "vrp_iv_minus_hv", "mnav", "btc_price"):
-                if rows[-1].get(k) not in (None, ""):
-                    row[k] = rows[-1][k]
+        # This completed session already has a row. Price/vol fields are reproducible; the
+        # chain-derived ones (IV30/VRP/mNAV/BTC) are not, so freeze them at their first
+        # recorded values. This covers ALL later same-date writes -- including next-morning
+        # intraday runs whose EOD anchor still points at this (now-closed) prior session --
+        # so a completed session's numbers are never revised by a later chain read. State is
+        # then recomputed from the frozen VRP so it stays consistent with the logged row.
+        existing = rows[-1]
+        for k in ("iv30", "vrp_iv_minus_hv", "mnav", "btc_price"):
+            if existing.get(k) not in (None, ""):
+                row[k] = existing[k]
+        fv = row["vrp_iv_minus_hv"]
+        frozen_vrp = float(fv) if fv not in (None, "") else float("nan")
+        state = classify(eod["ivp"], frozen_vrp, eod["rsi"], eod["below_ma50"])
+        row["state"] = state
+        row["dte_reco"] = DTE_BY_STATE.get(state, "-")
         rows[-1] = row
     else:
         rows.append(row)
