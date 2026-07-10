@@ -1,14 +1,14 @@
 {
-  "generated_utc": "2026-07-09 22:06 UTC",
-  "provisional": false,
-  "asof": "2026-07-09",
+  "generated_utc": "2026-07-10 15:38 UTC",
+  "provisional": true,
+  "asof": "2026-07-10",
   "state": "NEUTRAL",
   "dte_reco": "-",
   "iv_percentile": 88.0,
-  "vrp_iv_minus_hv": -3.7,
-  "iv30": 88.7,
-  "hv30": 92.3,
-  "close": 93.89,
-  "rsi14": 37.2,
+  "vrp_iv_minus_hv": -3.9,
+  "iv30": 88.5,
+  "hv30": 92.4,
+  "close": 94.28,
+  "rsi14": 37.6,
   "below_ma50": true
 }
