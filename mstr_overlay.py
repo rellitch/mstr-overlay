@@ -8,8 +8,11 @@ Tastytrade's API blocks cloud/datacenter IPs. Signals:
                       (this is exactly the basis the backtest used)
   - VRP             : chain-derived IV30 minus realized HV30, in vol points
   - RSI(14), MA20, MA50 : from price
-Classifies the v2 state, logs one row per trading day (in place), and
-optionally alerts on a state change. No API keys required.
+Classifies the v2 put/neutral state, plus an orthogonal covered-call premium
+tier (CALLS_GOOD_PREMIUM / CALLS_EXTREME_PREMIUM, keyed to premium richness --
+not direction) and a MELT-UP RISK warning (overbought above the 50d MA = the
+regime where sold calls historically get run over). Logs one row per completed
+session and optionally alerts on state or tier changes. No API keys required.
 
 Optional env vars:
   WEBHOOK_URL   - Discord/Slack incoming webhook for state-change alerts
@@ -34,19 +37,31 @@ CSV_PATH = Path(__file__).parent / "mstr_overlay_log.csv"
 SNAP_PATH = Path(__file__).parent / "live_snapshot.json"   # provisional intraday read for the dashboard
 
 # ---- v2 framework thresholds (single place to tune) -------------------------
-IVP_OPP, IVP_XTREME, IVP_XCALL = 50, 80, 90
-RSI_PUT, RSI_XPUT, RSI_CALL, RSI_XCALL = 45, 30, 60, 65
+IVP_OPP, IVP_XTREME = 50, 80
+RSI_PUT, RSI_XPUT = 45, 30
 VRP_DEADBAND = -2.0   # vol points. Ignore small negative VRP within the deadband of 0 to
                       # avoid daily on/off chatter at the zero line; stand down only below this.
-# Calls also require Close <= MA50 (trend gate). Active states need VRP > VRP_DEADBAND when known.
+# Put states need VRP > VRP_DEADBAND when VRP is known.
+
+# ---- covered-call premium tiers (orthogonal to the put/neutral state) --------
+# Backtest findings (2020-2026): the old directional call states never fired
+# (OPPORTUNE_CALLS gated to 0 days; EXTREME_CALLS_FLAG was a near-contradiction),
+# and RSI-overbought entries were the WORST days to sell calls in every IVP band.
+# So call signaling is re-keyed to PREMIUM RICHNESS, and RSI is demoted to a
+# melt-up *warning*. Tiers are for covered calls (shares owned), ~10-delta, 40-45 DTE.
+CALL_GOOD_IVP, CALL_GOOD_VRP = 60, 0     # good premium: vol elevated & IV > realized
+CALL_EXT_IVP, CALL_EXT_VRP = 75, 10      # extremely lucrative: fat VRP (IV pays 10+ pts over
+                                         # realized) in an elevated-vol regime. VRP is the primary
+                                         # richness axis: June-2026 capitulation printed VRP +18..+29
+                                         # while interp IVP peaked at 88 -- an IVP>=90 requirement
+                                         # would have missed the entire episode (the never-fires bug).
+MELTUP_RSI = 60                          # warning: overbought above the 50d MA -> calls get run over
 
 ET = ZoneInfo("America/New_York")   # for end-of-day (last completed session) anchoring
 
 DTE_BY_STATE = {
     "EXTREME_PUTS": "30-45",
     "OPPORTUNE_PUTS": "30-38",
-    "OPPORTUNE_CALLS": "30-45",
-    "EXTREME_CALLS_FLAG": "30-45 (manual judgment only)",
     "NEUTRAL": "-",
     "RICH_NO_SIDE": "- (premium rich, no directional confirmation)",
     "UNKNOWN": "-",
@@ -169,6 +184,10 @@ def strategy_mnav():
 
 
 def classify(ivp, vrp, rsi, below_ma50):
+    """Put/neutral state machine. The old OPPORTUNE_CALLS / EXTREME_CALLS_FLAG
+    branches are retired (0 fires in 5.9 backtested years; overbought entries were
+    the worst call-selling days in every IVP band) -- covered-call opportunity now
+    lives in call_tier()/meltup_risk() below. below_ma50 kept for signature compat."""
     if np.isnan(ivp) or np.isnan(rsi):
         return "UNKNOWN"
     if ivp < IVP_OPP:
@@ -177,13 +196,35 @@ def classify(ivp, vrp, rsi, below_ma50):
         return "NEUTRAL"
     if ivp >= IVP_XTREME and rsi <= RSI_XPUT:
         return "EXTREME_PUTS"
-    if ivp >= IVP_XCALL and rsi >= RSI_XCALL and below_ma50:
-        return "EXTREME_CALLS_FLAG"
     if rsi <= RSI_PUT:
         return "OPPORTUNE_PUTS"
-    if rsi >= RSI_CALL and below_ma50:
-        return "OPPORTUNE_CALLS"
     return "RICH_NO_SIDE"
+
+
+def call_tier(ivp, vrp):
+    """Covered-call premium tier, keyed to premium richness (NOT direction).
+    Requires live VRP (real chain IV30 minus HV30) -- if the chain was unavailable
+    this run, there is no honest richness read, so no tier. VRP >= 10 vol pts marks
+    the extremely-lucrative regime seen at capitulation (June 2026 hit +18..+29 while
+    IVP sat at 84-88). VRP thresholds are calibrated to the live log, NOT backtestable
+    (no free historical IV) -- revisit as the log grows."""
+    if np.isnan(ivp) or np.isnan(vrp):
+        return ""
+    if ivp >= CALL_EXT_IVP and vrp >= CALL_EXT_VRP:
+        return "CALLS_EXTREME_PREMIUM"
+    if ivp >= CALL_GOOD_IVP and vrp > CALL_GOOD_VRP:
+        return "CALLS_GOOD_PREMIUM"
+    return ""
+
+
+def meltup_risk(rsi, below_ma50):
+    """Warning flag (inverted role of the old call trigger): overbought ABOVE the
+    50d MA is the regime where sold calls historically got run over (mean edge
+    negative in every IVP band; worst episodes -85%..-160%). Not a trade signal --
+    a 'size down / expect to roll or be assigned' caution for covered-call writers."""
+    if np.isnan(rsi):
+        return False
+    return bool(rsi >= MELTUP_RSI and not below_ma50)
 
 
 def load_rows():
@@ -224,11 +265,15 @@ def main():
 
     # --- canonical end-of-day row (written to the log; one per completed session) ---
     state = classify(eod["ivp"], eod["vrp"], eod["rsi"], eod["below_ma50"])
+    tier = call_tier(eod["ivp"], eod["vrp"])
+    meltup = meltup_risk(eod["rsi"], eod["below_ma50"])
     mnav, btc_px = strategy_mnav()
     row = {
         "date": eod["asof"],                # last completed session (EOD-anchored), not wall-clock today
         "state": state,
         "dte_reco": DTE_BY_STATE.get(state, "-"),
+        "call_tier": tier,
+        "meltup_risk": meltup,
         "iv_percentile": round(eod["ivp"], 1) if not np.isnan(eod["ivp"]) else "",
         "vrp_iv_minus_hv": round(eod["vrp"], 1) if not np.isnan(eod["vrp"]) else "",
         "iv30": round(eod["iv30"], 1) if not np.isnan(eod["iv30"]) else "",
@@ -245,6 +290,7 @@ def main():
 
     rows = load_rows()
     prev = rows[-1]["state"] if rows else None
+    prev_tier = rows[-1].get("call_tier", "") if rows else None
     if rows and rows[-1].get("date") == row["date"]:
         # This completed session already has a row. Price/vol fields are reproducible; the
         # chain-derived ones (IV30/VRP/mNAV/BTC) are not, so freeze them at their first
@@ -261,6 +307,8 @@ def main():
         state = classify(eod["ivp"], frozen_vrp, eod["rsi"], eod["below_ma50"])
         row["state"] = state
         row["dte_reco"] = DTE_BY_STATE.get(state, "-")
+        tier = call_tier(eod["ivp"], frozen_vrp)   # tier depends on VRP -> recompute from frozen value
+        row["call_tier"] = tier
         rows[-1] = row
     else:
         rows.append(row)
@@ -276,6 +324,8 @@ def main():
         "asof": live["asof"],
         "state": live_state,
         "dte_reco": DTE_BY_STATE.get(live_state, "-"),
+        "call_tier": call_tier(live["ivp"], live["vrp"]),
+        "meltup_risk": meltup_risk(live["rsi"], live["below_ma50"]),
         "iv_percentile": round(live["ivp"], 1) if not np.isnan(live["ivp"]) else None,
         "vrp_iv_minus_hv": round(live["vrp"], 1) if not np.isnan(live["vrp"]) else None,
         "iv30": round(live["iv30"], 1) if not np.isnan(live["iv30"]) else None,
@@ -289,16 +339,20 @@ def main():
     line = (f"{row['date']}  MSTR ${row['close']}  STATE={state}  "
             f"VolPct={row['iv_percentile']}  VRP={row['vrp_iv_minus_hv']}  "
             f"RSI={row['rsi14']}  vs50dMA={'below' if eod['below_ma50'] else 'above'}  "
-            f"DTE={row['dte_reco']}")
+            f"DTE={row['dte_reco']}  CallTier={row['call_tier'] or '-'}  Meltup={row['meltup_risk']}")
     print(line)
     if partial:
         print(f"[live] provisional {live_state}  VolPct={snap['iv_percentile']} "
-              f"VRP={snap['vrp_iv_minus_hv']} RSI={snap['rsi14']} close={snap['close']}")
+              f"VRP={snap['vrp_iv_minus_hv']} RSI={snap['rsi14']} close={snap['close']} "
+              f"CallTier={snap['call_tier'] or '-'}")
 
-    # Alerts fire on canonical (session-to-session) state changes only -> no intraday flapping.
+    # Alerts fire on canonical (session-to-session) changes only -> no intraday flapping.
     if prev is not None and prev != state and state != "UNKNOWN":
         notify(f"MSTR overlay STATE CHANGE: {prev} -> {state}\n{line}")
         print(f"[ALERT] state changed: {prev} -> {state}")
+    if prev_tier is not None and prev_tier != tier:
+        notify(f"MSTR covered-call premium tier: {prev_tier or 'none'} -> {tier or 'none'}\n{line}")
+        print(f"[ALERT] call tier changed: {prev_tier or 'none'} -> {tier or 'none'}")
 
 
 if __name__ == "__main__":

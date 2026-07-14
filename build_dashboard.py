@@ -37,12 +37,25 @@ def last_completed_session():
 STATE_META = {
     "EXTREME_PUTS":       ("Extremely opportune — SELL PUTS", "#0f7a3d", "Highest-conviction put window (IVP≥80, capitulation)."),
     "OPPORTUNE_PUTS":     ("Opportune — sell puts",            "#1f9d57", "Rich premium + washed-out price."),
-    "OPPORTUNE_CALLS":    ("Opportune — sell calls",           "#1769aa", "Rich premium + overbought bounce below the 50-day MA."),
-    "EXTREME_CALLS_FLAG": ("Manual flag — extreme calls",      "#8a5cc4", "Rare; treat as judgment call, not a mechanical signal."),
-    "RICH_NO_SIDE":       ("Premium rich — no clear side",     "#6b7a8f", "IV is elevated but no directional confirmation. Wait."),
+    # Legacy states kept only so historical rows (if any) still render:
+    "OPPORTUNE_CALLS":    ("(retired) opportune calls",        "#9ca3af", "Retired: directional call states never fired; see the call-premium tier instead."),
+    "EXTREME_CALLS_FLAG": ("(retired) extreme calls flag",     "#9ca3af", "Retired: near-contradictory condition; see the call-premium tier instead."),
+    "RICH_NO_SIDE":       ("Premium rich — no clear side",     "#6b7a8f", "IV is elevated but no put confirmation. Check the covered-call premium tier."),
     "NEUTRAL":            ("Neutral — do nothing opportunistic","#6b7280", "Low IV or no vol premium. The mechanical wheel runs as usual."),
     "UNKNOWN":            ("Unknown — data issue",             "#9ca3af", "A metric was missing on this run. Check the latest Action log."),
 }
+
+# Covered-call premium tiers (orthogonal to the put/neutral state; premium richness, not direction).
+TIER_META = {
+    "CALLS_EXTREME_PREMIUM": ("EXTREMELY LUCRATIVE call premium", "#7c2d92",
+                              "IVP≥75 + VRP≥10: IV paying 10+ vol pts over realized in an elevated-vol "
+                              "regime (June-2026 capitulation printed VRP +18..+29). Richest credits."),
+    "CALLS_GOOD_PREMIUM":    ("Good call premium", "#1769aa",
+                              "IVP≥60 + VRP>0: elevated vol percentile, IV above realized. Covered calls pay decently."),
+    "":                      ("No call-premium tier", "#6b7280",
+                              "Premium not rich enough (or chain IV unavailable this run)."),
+}
+RETIRED_STATES = {"OPPORTUNE_CALLS", "EXTREME_CALLS_FLAG"}
 
 def live_panel(snap):
     """Provisional intraday read, shown only while a session is in progress. The confirmed
@@ -54,10 +67,16 @@ def live_panel(snap):
     color = STATE_META.get(st, STATE_META["UNKNOWN"])[1]
     def s(v): return html.escape("—" if v in (None, "") else str(v))
     below = str(snap.get("below_ma50")).lower() == "true"
+    ltier = snap.get("call_tier") or ""
+    tier_pill = ""
+    if ltier:
+        tier_pill = f"<span class='pill' style='background:{TIER_META.get(ltier, TIER_META[''])[1]}'>{s(ltier)}</span>"
+    if snap.get("meltup_risk"):
+        tier_pill += "<span class='pill' style='background:#b42318'>MELT-UP RISK</span>"
     return (
         f"<div style='border:2px dashed {color};border-radius:14px;padding:14px 16px;margin:10px 0 4px;background:#fff'>"
         f"<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap'>"
-        f"<span class='pill' style='background:{color}'>LIVE · {s(st)}</span>"
+        f"<span class='pill' style='background:{color}'>LIVE · {s(st)}</span>{tier_pill}"
         f"<span style='font-size:12px;color:#b54708;font-weight:600'>PROVISIONAL — session in progress, not final until the close</span>"
         f"</div>"
         f"<div style='font-size:13px;color:#475467;margin-top:8px'>"
@@ -123,14 +142,31 @@ def build():
     state = cur.get("state", "UNKNOWN")
     title, color, blurb = STATE_META.get(state, STATE_META["UNKNOWN"])
 
+    tier = cur.get("call_tier", "") or ""
+    tier_title, tier_color, tier_blurb = TIER_META.get(tier, TIER_META[""])
+    meltup = str(cur.get("meltup_risk", "")).lower() == "true"
+    tier_html = (
+        f"<div style='border-left:6px solid {tier_color};background:#fff;border:1px solid #eaecf0;"
+        f"border-left:6px solid {tier_color};border-radius:12px;padding:12px 16px;margin:0 0 10px'>"
+        f"<div style='font-size:13px;color:#667085'>Covered-call premium tier "
+        f"<span style='color:#98a2b3'>(income view for shares you own &mdash; 10&Delta;, 40&ndash;45 DTE; richness, not direction)</span></div>"
+        f"<div style='font-size:18px;font-weight:700;color:{tier_color};margin-top:2px'>{html.escape(tier_title)}</div>"
+        f"<div style='font-size:12px;color:#667085;margin-top:2px'>{html.escape(tier_blurb)}</div></div>")
+    if meltup:
+        tier_html += (
+            "<div style='background:#b42318;color:#fff;border-radius:10px;padding:10px 14px;"
+            "margin:0 0 10px;font-size:13px'>&#9888; <b>MELT-UP RISK</b> &mdash; RSI&ge;60 above the "
+            "50-day MA. Historically the worst days to sell calls (they get run over); if writing "
+            "covered calls anyway, size down and expect to roll or be assigned.</div>")
+
     cards = [
         ("Vol Percentile", fnum(cur.get("iv_percentile"), 1), "primary trigger (RV basis)"),
         ("VRP (IV−HV)", fnum(cur.get("vrp_iv_minus_hv"), 1), "vol points; act unless < −2"),
-        ("RSI(14)", fnum(cur.get("rsi14"), 0), "side selection"),
+        ("RSI(14)", fnum(cur.get("rsi14"), 0), "puts side selection; ≥60 = melt-up flag"),
         ("Price", fnum(cur.get("close"), 2, ""), "MSTR close"),
-        ("vs 50-day MA", "below" if str(cur.get("below_ma50")).lower() == "true" else "above", "calls need 'below'"),
+        ("vs 50-day MA", "below" if str(cur.get("below_ma50")).lower() == "true" else "above", "trend context"),
         ("IV30 / HV30", f"{fnum(cur.get('iv30'),0)} / {fnum(cur.get('hv30'),0)}", "implied vs realized"),
-        ("DTE to sell", html.escape(str(cur.get("dte_reco", "—"))), "recommended tenor"),
+        ("DTE to sell", html.escape(str(cur.get("dte_reco", "—"))), "recommended tenor (puts)"),
         ("mNAV", fnum(cur.get("mnav"), 2) if cur.get("mnav") not in (None, "", "—") else "—", "official (EV / BTC NAV)"),
     ]
     card_html = "".join(
@@ -141,7 +177,7 @@ def build():
     chart = sparkline_svg(rows[-90:], "iv_percentile")
 
     recent = rows[-30:][::-1]
-    cols = ["date", "state", "iv_percentile", "vrp_iv_minus_hv", "rsi14", "close", "below_ma50", "dte_reco"]
+    cols = ["date", "state", "call_tier", "iv_percentile", "vrp_iv_minus_hv", "rsi14", "close", "below_ma50", "dte_reco"]
     head = "".join(f"<th>{html.escape(c)}</th>" for c in cols)
     trs = ""
     for r in recent:
@@ -151,12 +187,18 @@ def build():
             val = html.escape(str(r.get(col, "")))
             if col == "state":
                 val = f"<span class='pill' style='background:{c}'>{val}</span>"
+            elif col == "call_tier" and r.get("call_tier"):
+                tc = TIER_META.get(r.get("call_tier", ""), TIER_META[""])[1]
+                val = f"<span class='pill' style='background:{tc}'>{val}</span>"
             tds += f"<td>{val}</td>"
         trs += f"<tr>{tds}</tr>"
 
     legend = "".join(
         f"<span class='pill' style='background:{m[1]}'>{html.escape(k)}</span>"
-        for k, m in STATE_META.items() if k != "UNKNOWN")
+        for k, m in STATE_META.items() if k != "UNKNOWN" and k not in RETIRED_STATES)
+    legend += "".join(
+        f"<span class='pill' style='background:{m[1]}'>{html.escape(k)}</span>"
+        for k, m in TIER_META.items() if k)
 
     expected = last_completed_session().isoformat()
     latest_date = cur.get("date", "")
@@ -183,6 +225,7 @@ def build():
         <div class='banner-blurb'>{html.escape(blurb)}</div>
         <div class='banner-date'>Confirmed signal &mdash; last completed session: {html.escape(cur.get('date',''))}</div>
       </div>
+      {tier_html}
       <div class='grid'>{card_html}</div>
       <h2>Vol Percentile — last 90 readings</h2>
       <p class='muted'>Dashed lines at 50 (opportune threshold) and 80 (extreme threshold). Dot color = state that day.</p>
