@@ -1,16 +1,16 @@
 {
-  "generated_utc": "2026-07-23 18:19 UTC",
+  "generated_utc": "2026-07-23 19:57 UTC",
   "provisional": true,
   "asof": "2026-07-23",
-  "state": "OPPORTUNE_PUTS",
-  "dte_reco": "30-38",
+  "state": "NEUTRAL",
+  "dte_reco": "-",
   "call_tier": "",
   "meltup_risk": false,
   "iv_percentile": 81.5,
-  "vrp_iv_minus_hv": -1.9,
-  "iv30": 82.0,
+  "vrp_iv_minus_hv": -2.1,
+  "iv30": 81.8,
   "hv30": 83.9,
-  "close": 93.84,
+  "close": 93.76,
   "rsi14": 40.7,
   "below_ma50": true
 }
