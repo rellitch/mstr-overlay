@@ -49,6 +49,19 @@ jobs:
         run: |
           git config user.name "mstr-overlay-bot"
           git config user.email "actions@github.com"
-          git add mstr_overlay_log.csv index.html live_snapshot.json
-          git diff --staged --quiet || git commit -m "log: $(date -u +%Y-%m-%d) overlay reading"
-          git push
+          # Push with regenerate-and-retry. A plain `git push` fails whenever main has
+          # moved past this run's pinned checkout -- which happens on every "Re-run" of
+          # an older run after any newer run has pushed (observed 2026-08-06), and on
+          # genuine run races. Since all outputs are deterministic regenerations from
+          # fresh data, the fix is: reset to the CURRENT tip, regenerate, push again.
+          for attempt in 1 2 3; do
+            git add mstr_overlay_log.csv index.html live_snapshot.json
+            git diff --staged --quiet || git commit -m "log: $(date -u +%Y-%m-%d) overlay reading"
+            if git push; then exit 0; fi
+            echo "push rejected (attempt $attempt): main moved; rebasing onto current tip and regenerating"
+            git fetch origin main
+            git reset --hard origin/main
+            python mstr_overlay.py
+            python build_dashboard.py
+          done
+          echo "push still failing after 3 attempts"; exit 1
