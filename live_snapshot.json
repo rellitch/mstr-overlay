@@ -1,16 +1,16 @@
 {
-  "generated_utc": "2026-08-11 14:22 UTC",
+  "generated_utc": "2026-08-11 15:31 UTC",
   "provisional": true,
   "asof": "2026-08-11",
   "state": "NEUTRAL",
   "dte_reco": "-",
   "call_tier": "",
   "meltup_risk": false,
-  "iv_percentile": 32.6,
-  "vrp_iv_minus_hv": 6.6,
-  "iv30": 69.3,
-  "hv30": 62.7,
-  "close": 98.2,
-  "rsi14": 48.5,
+  "iv_percentile": 32.7,
+  "vrp_iv_minus_hv": 4.3,
+  "iv30": 67.1,
+  "hv30": 62.8,
+  "close": 96.14,
+  "rsi14": 46.2,
   "below_ma50": true
 }
