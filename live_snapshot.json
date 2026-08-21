@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-08-21 13:52 UTC",
+  "generated_utc": "2026-08-21 14:46 UTC",
   "provisional": true,
   "asof": "2026-08-21",
   "state": "RICH_NO_SIDE",
@@ -7,8 +7,8 @@
   "call_tier": "CALLS_GOOD_PREMIUM",
   "meltup_risk": true,
   "iv_percentile": 64.7,
-  "vrp_iv_minus_hv": 8.0,
-  "iv30": 79.0,
+  "vrp_iv_minus_hv": 8.7,
+  "iv30": 79.7,
   "hv30": 71.0,
   "close": 119.93,
   "rsi14": 66.4,
