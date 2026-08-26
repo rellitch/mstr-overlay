@@ -59,3 +59,4 @@ date,state,dte_reco,call_tier,meltup_risk,iv_percentile,vrp_iv_minus_hv,iv30,hv3
 2026-08-21,RICH_NO_SIDE,"- (premium rich, no directional confirmation)",CALLS_GOOD_PREMIUM,True,62.4,5.7,76.3,70.6,119.25,66.1,98.57,99.78,21.0,False,0.99,77480.0
 2026-08-24,RICH_NO_SIDE,"- (premium rich, no directional confirmation)",CALLS_GOOD_PREMIUM,True,60.5,5.7,75.7,70.0,122.63,68.0,99.77,99.83,22.9,False,0.995,78956.0
 2026-08-25,RICH_NO_SIDE,"- (premium rich, no directional confirmation)",,True,55.9,3.7,72.7,68.9,126.83,70.2,101.3,99.89,25.2,False,1.025,78692.0
+2026-08-26,RICH_NO_SIDE,"- (premium rich, no directional confirmation)",,True,59.1,-1.0,68.8,69.8,123.19,65.9,102.79,99.73,19.8,False,1.005,78499.0
