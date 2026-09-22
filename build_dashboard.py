@@ -57,6 +57,26 @@ TIER_META = {
 }
 RETIRED_STATES = {"OPPORTUNE_CALLS", "EXTREME_CALLS_FLAG"}
 
+VRP_DEADBAND = -2.0   # mirrors mstr_overlay.VRP_DEADBAND. Display only -- state logic lives in the engine.
+
+def vrp_gap_banner(row):
+    """One plain-language line for the realized-vs-implied gap, shown whenever VRP is
+    meaningfully negative (below the deadband -- the same condition that forces NEUTRAL).
+    On a realized-vol spike the vol percentile reads high while premium is actually cheap;
+    this makes the reason for standing down explicit. Purely additive display."""
+    try:
+        vrp = float(row.get("vrp_iv_minus_hv"))
+    except (TypeError, ValueError):
+        return ""
+    if vrp >= VRP_DEADBAND:
+        return ""
+    hv, iv = fnum(row.get("hv30"), 0), fnum(row.get("iv30"), 0)
+    return (
+        "<div style='background:#fffaeb;border:1px solid #fedf89;border-left:6px solid #b54708;"
+        "border-radius:10px;padding:10px 14px;margin:-8px 0 12px;font-size:13px;color:#7a2e0e'>"
+        f"Realized vol <b>{hv}</b> is <b>{abs(vrp):.1f} pts above</b> implied <b>{iv}</b> &mdash; "
+        "premium is cheap vs. movement; stand down.</div>")
+
 def live_panel(snap):
     """Provisional intraday read, shown only while a session is in progress. The confirmed
     end-of-day signal is the banner below; this box is the developing live read so an
@@ -225,6 +245,7 @@ def build():
         <div class='banner-blurb'>{html.escape(blurb)}</div>
         <div class='banner-date'>Confirmed signal &mdash; last completed session: {html.escape(cur.get('date',''))}</div>
       </div>
+      {vrp_gap_banner(cur)}
       {tier_html}
       <div class='grid'>{card_html}</div>
       <h2>Vol Percentile — last 90 readings</h2>

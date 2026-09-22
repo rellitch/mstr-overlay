@@ -237,6 +237,17 @@ def load_rows():
         return []
 
 
+def _dedup_sorted(rows):
+    """Enforce exactly one row per trading date, ascending by date. If the log already
+    holds duplicates for a date, keep the FIRST-recorded row: it was written closest to
+    that session's close, and under the freeze rule in main() its chain-derived values
+    (IV30/VRP/mNAV/BTC) are the canonical ones for that session."""
+    seen = {}
+    for r in rows:
+        seen.setdefault(r.get("date", ""), r)
+    return [seen[d] for d in sorted(seen)]
+
+
 def save_rows(rows, fieldnames):
     with open(CSV_PATH, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -288,17 +299,29 @@ def main():
         "btc_price": round(btc_px, 0) if btc_px else "",
     }
 
-    rows = load_rows()
-    prev = rows[-1]["state"] if rows else None
-    prev_tier = rows[-1].get("call_tier", "") if rows else None
-    if rows and rows[-1].get("date") == row["date"]:
+    rows = _dedup_sorted(load_rows())
+    # Look the session up BY DATE across the whole log, not just the last row. Yahoo
+    # occasionally serves a daily frame that lags one or two sessions (seen 2026-07-15,
+    # 07-27, 08-18, 08-31): the EOD anchor then points at an OLDER date than the last
+    # logged row, and a last-row-only check appended it as a duplicate -- after which the
+    # next correct run re-appended the newer date too. Matching by date makes every rerun
+    # for a trading date overwrite that date's single row, wherever it sits in the log.
+    idx = next((i for i, r in enumerate(rows) if r.get("date") == row["date"]), None)
+    if idx is not None:
+        ref = rows[idx]                     # rerun: alert only if THIS date's logged state changes
+    else:
+        earlier = [r for r in rows if r.get("date", "") < row["date"]]
+        ref = earlier[-1] if earlier else None   # new session: compare to the prior session
+    prev = ref["state"] if ref else None
+    prev_tier = ref.get("call_tier", "") if ref else None
+    if idx is not None:
         # This completed session already has a row. Price/vol fields are reproducible; the
         # chain-derived ones (IV30/VRP/mNAV/BTC) are not, so freeze them at their first
         # recorded values. This covers ALL later same-date writes -- including next-morning
         # intraday runs whose EOD anchor still points at this (now-closed) prior session --
         # so a completed session's numbers are never revised by a later chain read. State is
         # then recomputed from the frozen VRP so it stays consistent with the logged row.
-        existing = rows[-1]
+        existing = rows[idx]
         for k in ("iv30", "vrp_iv_minus_hv", "mnav", "btc_price"):
             if existing.get(k) not in (None, ""):
                 row[k] = existing[k]
@@ -309,9 +332,10 @@ def main():
         row["dte_reco"] = DTE_BY_STATE.get(state, "-")
         tier = call_tier(eod["ivp"], frozen_vrp)   # tier depends on VRP -> recompute from frozen value
         row["call_tier"] = tier
-        rows[-1] = row
+        rows[idx] = row
     else:
         rows.append(row)
+    rows = _dedup_sorted(rows)              # exactly one row per trading date, ascending
     save_rows(rows, list(row.keys()))
 
     # --- provisional intraday snapshot (for the dashboard; NOT in the canonical log) ---
