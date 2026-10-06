@@ -55,7 +55,7 @@ jobs:
           # genuine run races. Since all outputs are deterministic regenerations from
           # fresh data, the fix is: reset to the CURRENT tip, regenerate, push again.
           for attempt in 1 2 3; do
-            git add mstr_overlay_log.csv index.html live_snapshot.json
+            git add mstr_overlay_log.csv index.html live_snapshot.json asst_overlay_log.csv asst_live_snapshot.json
             git diff --staged --quiet || git commit -m "log: $(date -u +%Y-%m-%d) overlay reading"
             if git push; then exit 0; fi
             echo "push rejected (attempt $attempt): main moved; rebasing onto current tip and regenerating"

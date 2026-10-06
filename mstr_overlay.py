@@ -21,6 +21,27 @@ not direction) and a MELT-UP RISK warning (overbought above the 50d MA = the
 regime where sold calls historically get run over). Logs one row per completed
 session and optionally alerts on state or tier changes. No API keys required.
 
+Second ticker -- ASST (Strive) RELATIVE-RICHNESS MONITOR, UNVALIDATED
+---------------------------------------------------------------------
+ASST is NOT a backtested engine and must never be read as one. Its Bitcoin-treasury
+era only began 2025-09-12 (Strive / Asset Entities merger close), so there is no
+history to fit or validate thresholds against, and its chain is thin (ATM only is
+liquid; OTM open interest in the tens; spreads 25-65% of mid). The monitor:
+  - caps every lookback at ASST_START (pre-merger bars are an unrelated micro-cap)
+  - reads IV from near-money OTM strikes only (deep-ITM Yahoo IV is junk)
+  - scores richness RELATIVELY: IV30 vs SHORT realized vol (HV10 and HV21), both
+    smoothed over ASST_SMOOTH_DAYS sessions, treated as a RANGE -- rich only when
+    both are comfortably positive, stand down when either is clearly negative
+  - shows IV30 / MSTR IV30 and IV30 / IBIT IV30 (BTC-vol-regime normalizers) as context
+  - reuses MSTR's side-selection structure (RSI + 50d MA; call tier keyed to
+    richness; melt-up warning) with thresholds BORROWED from MSTR and the VRP band
+    WIDENED to +-8 vol pts because ASST's spreads make its IV uncertain by ~8 pts
+  - never computes mNAV (no clean data source) and never uses an own-history IV
+    rank as a trigger (shown as low-confidence context only)
+Every ASST parameter lives in the ASST_* block below. The MSTR engine is untouched:
+its config reproduces the pre-ASST behavior exactly (log, snapshot and console
+output are byte-identical for the same inputs).
+
 Optional env vars:
   WEBHOOK_URL   - Discord/Slack incoming webhook for state-change alerts
   BTC_HOLDINGS  - Strategy's BTC count, for mNAV context (needs market cap; left blank here)
@@ -39,9 +60,10 @@ import pandas as pd
 import yfinance as yf
 import requests
 
+HERE = Path(__file__).parent
 SYMBOL = "MSTR"
-CSV_PATH = Path(__file__).parent / "mstr_overlay_log.csv"
-SNAP_PATH = Path(__file__).parent / "live_snapshot.json"   # provisional intraday read for the dashboard
+CSV_PATH = HERE / "mstr_overlay_log.csv"
+SNAP_PATH = HERE / "live_snapshot.json"   # provisional intraday read for the dashboard
 
 # ---- v2 framework thresholds (single place to tune) -------------------------
 IVP_OPP, IVP_XTREME = 50, 80
@@ -81,15 +103,47 @@ DTE_BY_STATE = {
     "UNKNOWN": "-",
 }
 
+# ============================================================================
+# ASST monitor parameters -- UNVALIDATED. Borrowed from MSTR's v2 thresholds as a
+# starting template; there is not enough ASST history (BTC-treasury era since
+# 2025-09-12) to fit or validate any of them. Tune here, nowhere else.
+# ============================================================================
+ASST_START = "2025-09-12"        # Strive/Asset Entities merger close; no bars before this
+ASST_MIN_BARS = 60               # enough for MA50 + RV30 (+ a few RV30 points for context)
+ASST_HV_SHORT, ASST_HV_MID = 10, 21      # realized-vol windows for the VRP range
+ASST_SMOOTH_DAYS = 3             # IV30 / HV smoothed over this many sessions (today + prior log rows)
+ASST_VRP_RICH = 8.0              # RICH when BOTH smoothed VRPs >= this. MSTR uses 0 (CALL_GOOD_VRP);
+                                 # widened: ASST spreads make IV30 uncertain by ~+-8 vol pts
+ASST_VRP_CHEAP = -8.0            # CHEAP (stand down) when EITHER smoothed VRP <= this (MSTR: -2 deadband)
+ASST_CALL_EXT_VRP = 18.0         # CALLS_EXTREME_PREMIUM when both VRPs >= this (MSTR: 10 = good + 10)
+ASST_RSI_PUT, ASST_RSI_XPUT = RSI_PUT, RSI_XPUT   # 45 / 30, borrowed unchanged
+ASST_MELTUP_RSI = MELTUP_RSI     # 60, borrowed unchanged (same melt-up regime logic)
+ASST_MAX_REL_SPREAD = 1.2        # accept quotes up to (ask-bid)/mid = 1.2 (MSTR: 0.5) -- ASST's
+                                 # normal spreads are 0.25-0.65; without this most strikes would
+                                 # fall back to Yahoo's last-trade IV. iv_mid_share logs the mix.
+ASST_PEERS = ("MSTR", "IBIT")    # cross-sectional IV normalizers (display only)
 
-def get_price_frame():
-    """~2y of daily closes (enough for a 252-day percentile + the moving averages)."""
+MSTR_CFG = dict(symbol="MSTR", engine="v2", log=CSV_PATH, snap=SNAP_PATH,
+                history_start=None, min_bars=260, max_rel_spread=MAX_REL_SPREAD,
+                atm_otm_only=False)
+ASST_CFG = dict(symbol="ASST", engine="monitor", log=HERE / "asst_overlay_log.csv",
+                snap=HERE / "asst_live_snapshot.json",
+                history_start=ASST_START, min_bars=ASST_MIN_BARS,
+                max_rel_spread=ASST_MAX_REL_SPREAD, atm_otm_only=True)
+TICKERS = [MSTR_CFG, ASST_CFG]   # MSTR first: ASST's peer ratio reads MSTR's IV30 from this run
+
+
+def get_price_frame(symbol=SYMBOL, start=None, min_bars=260):
+    """~2y of daily closes (enough for a 252-day percentile + the moving averages).
+    `start` drops every bar before that date (ASST: pre-merger history is unrelated)."""
     last_err = None
     for _ in range(3):
         try:
-            px = yf.download(SYMBOL, period="2y", interval="1d",
+            px = yf.download(symbol, period="2y", interval="1d",
                              auto_adjust=True, progress=False)["Close"].squeeze().dropna()
-            if len(px) > 260:
+            if start:
+                px = px[px.index >= pd.Timestamp(start)]
+            if len(px) > min_bars:
                 return px
         except Exception as e:
             last_err = e
@@ -143,7 +197,7 @@ def _expiry_T(exp, now_et):
     return (close - now_et).total_seconds() / (365.0 * 86400), (close.date() - now_et.date()).days
 
 
-def _price_expiry(ch, spot, T):
+def _price_expiry(ch, spot, T, max_rel_spread=MAX_REL_SPREAD):
     """One expiry's calls+puts with a mid price, IV and delta per strike. IV is solved
     from the bid/ask MID: Yahoo's own impliedVolatility is computed from lastPrice,
     which can be hours stale (or junk off-hours). Yahoo's IV is kept only as a
@@ -153,7 +207,7 @@ def _price_expiry(ch, spot, T):
     bid = df["bid"].fillna(0).to_numpy(float)
     ask = df["ask"].fillna(0).to_numpy(float)
     mid = (bid + ask) / 2
-    quoted = (bid > 0) & (ask >= bid) & ((ask - bid) <= MAX_REL_SPREAD * mid)
+    quoted = (bid > 0) & (ask >= bid) & ((ask - bid) <= max_rel_spread * mid)
     strike = df["strike"].to_numpy(float)
     is_call = df["is_call"].to_numpy(bool)
     iv = implied_vol(np.where(quoted, mid, np.nan), spot, strike, T, is_call)
@@ -215,33 +269,46 @@ def _iv_at_delta(side, want):
     return float(np.interp(want, s["delta"], s["iv"]))
 
 
-def chain_read(spot):
+def chain_read(spot, symbol=SYMBOL, max_rel_spread=MAX_REL_SPREAD, otm_only=False):
     """Best-effort read of the live chain in ONE pass (each field NaN/None if unavailable):
       iv30  constant-maturity 30-day ATM IV (percent), variance-interpolated
       rr25  25-delta risk reversal, call IV minus put IV (vol pts) at the put-target
             expiry; > 0 means OTM calls are priced richer than OTM puts
       put   the ~30-delta put at 30-45 DTE     (dict from _target_contract)
-      call  the ~10-delta call at 40-45 DTE    (dict from _target_contract)"""
-    out = dict(iv30=float("nan"), rr25=float("nan"), put=None, call=None)
+      call  the ~10-delta call at 40-45 DTE    (dict from _target_contract)
+      iv_mid_share  % of the ATM strikes behind iv30 whose IV came from a bid/ask mid
+                    (the rest fell back to Yahoo's last-trade IV)
+    otm_only=True restricts the ATM sample to out-of-the-money-or-at-the-money strikes
+    (calls at/above spot, puts at/below): thin chains (ASST) print junk IV on ITM strikes."""
+    out = dict(iv30=float("nan"), rr25=float("nan"), put=None, call=None, iv_mid_share=float("nan"))
     try:
-        t = yf.Ticker(SYMBOL)
+        t = yf.Ticker(symbol)
         now = dt.datetime.now(ET)
         frames = {}
         for e in t.options:
             T, dte = _expiry_T(e, now)
             if 7 <= dte <= 80 and T > 0:
                 try:
-                    df = _price_expiry(t.option_chain(e), spot, T)
+                    df = _price_expiry(t.option_chain(e), spot, T, max_rel_spread)
                 except Exception:
                     continue
                 if len(df) >= 3:
                     frames[e] = (T, dte, df)
         if not frames:
             return out
-        atm = sorted((T, float(df.assign(d=(df["strike"] - spot).abs()).nsmallest(6, "d")["iv"].mean()))
-                     for T, _, df in frames.values())
+        atm, n_mid, n_all = [], 0, 0
+        for T, _, df in frames.values():
+            if otm_only:
+                df = df[(df["is_call"] & (df["strike"] >= spot)) | (~df["is_call"] & (df["strike"] <= spot))]
+            pick = df.assign(d=(df["strike"] - spot).abs()).nsmallest(6, "d")
+            if len(pick) >= 3:
+                atm.append((T, float(pick["iv"].mean())))
+                n_mid += int(pick["quoted"].sum())
+                n_all += len(pick)
+        atm.sort()
         if len(atm) >= 2:
             out["iv30"] = _const_maturity(atm, 30 / 365) * 100
+            out["iv_mid_share"] = 100.0 * n_mid / n_all if n_all else float("nan")
         out["put"] = _target_contract(frames, PUT_DELTA, PUT_DTE, spot)
         out["call"] = _target_contract(frames, CALL_DELTA, CALL_DTE, spot)
         e = _pick_expiry(frames, *PUT_DTE)
@@ -267,8 +334,10 @@ def _frame_metrics(px):
     if len(win) > 30:
         prior = np.sort(win.iloc[:-1].to_numpy())
         rvp = float(np.interp(win.iloc[-1], prior, np.linspace(0, 100, len(prior))))
+        rvp_n = len(prior)
     else:
         rvp = float("nan")
+        rvp_n = 0
 
     delta = px.diff()
     gain = delta.clip(lower=0)
@@ -279,9 +348,13 @@ def _frame_metrics(px):
     ma20 = float(px.rolling(20).mean().iloc[-1])
     ma50 = float(px.rolling(50).mean().iloc[-1])
     last = float(px.iloc[-1])
+    # Short realized-vol windows (ASST monitor's VRP range; unused by the MSTR v2 engine).
+    rv10 = float((ret.rolling(ASST_HV_SHORT).std() * np.sqrt(252) * 100).iloc[-1])
+    rv21 = float((ret.rolling(ASST_HV_MID).std() * np.sqrt(252) * 100).iloc[-1])
     return dict(close=last, rsi=rsi, ma20=ma20, ma50=ma50,
                 dist_ma20=(last/ma20-1)*100, below_ma50=bool(last <= ma50),
-                rv30=rv30, rvp=rvp, asof=px.index[-1].date().isoformat())
+                rv30=rv30, rvp=rvp, rvp_n=rvp_n, rv10=rv10, rv21=rv21,
+                asof=px.index[-1].date().isoformat())
 
 
 def _attach_chain(m, chain):
@@ -291,10 +364,11 @@ def _attach_chain(m, chain):
     m["vrp"] = (iv30 - m["rv30"]) if not np.isnan(iv30) else float("nan")   # vol points
     m["rr25"] = chain["rr25"]
     m["put"], m["call"] = chain["put"], chain["call"]
+    m["iv_mid_share"] = chain.get("iv_mid_share", float("nan"))
     return m
 
 
-def compute_metrics():
+def compute_metrics(cfg=MSTR_CFG):
     """Compute BOTH anchors in one shot, sharing a single chain pull:
       eod  = last COMPLETED session -> canonical, written to the log (reproducible,
              backtest-consistent, immune to intraday run timing).
@@ -302,14 +376,27 @@ def compute_metrics():
              dashboard, so an intraday decision isn't made off a stale prior close.
     If the regular session is already closed (or there is no live bar today, e.g. a
     holiday/weekend), `live` is `eod` and `partial` is False. Returns (eod, live, partial)."""
-    full = get_price_frame()
+    full = get_price_frame(cfg["symbol"], cfg["history_start"], cfg["min_bars"])
     now = dt.datetime.now(ET)
     partial = (full.index[-1].date() == now.date()) and (now.time() < dt.time(16, 15))
     eod_px = full.iloc[:-1] if partial else full
-    chain = chain_read(float(full.iloc[-1]))            # current chain (one pass, shared)
+    chain = chain_read(float(full.iloc[-1]), cfg["symbol"], cfg["max_rel_spread"],
+                       cfg["atm_otm_only"])            # current chain (one pass, shared)
     eod = _attach_chain(_frame_metrics(eod_px), chain)
     live = _attach_chain(_frame_metrics(full), chain) if partial else eod
     return eod, live, partial
+
+
+def peer_iv30(symbol):
+    """IV30 of a peer (IBIT) for the ASST cross-sectional ratio: last close + one chain
+    pass. NaN on any failure -- the ratio is context, never a trigger."""
+    try:
+        px = yf.download(symbol, period="5d", interval="1d",
+                         auto_adjust=True, progress=False)["Close"].squeeze().dropna()
+        return chain_read(float(px.iloc[-1]), symbol)["iv30"]
+    except Exception as e:
+        print(f"[warn] {symbol} peer IV unavailable ({type(e).__name__}: {e})", file=sys.stderr)
+        return float("nan")
 
 
 def strategy_mnav():
@@ -361,27 +448,147 @@ def call_tier(rvp, vrp):
     return ""
 
 
-def meltup_risk(rsi, below_ma50):
+def meltup_risk(rsi, below_ma50, threshold=MELTUP_RSI):
     """Warning flag (inverted role of the old call trigger): overbought ABOVE the
     50d MA is the regime where sold calls historically got run over (mean edge
     negative in every IVP band; worst episodes -85%..-160%). Not a trade signal --
     a 'size down / expect to roll or be assigned' caution for covered-call writers."""
     if np.isnan(rsi):
         return False
-    return bool(rsi >= MELTUP_RSI and not below_ma50)
+    return bool(rsi >= threshold and not below_ma50)
+
+
+# ---- ASST monitor logic (UNVALIDATED; parameters in the ASST_* block) --------
+def asst_richness(vrp10, vrp21):
+    """Relative premium richness from the smoothed VRP RANGE (IV30 - HV10, IV30 - HV21):
+    RICH when both are comfortably positive, CHEAP when either is clearly negative,
+    UNCLEAR in between (inside the +-ASST_VRP_RICH noise band). '' if VRP unknown."""
+    if np.isnan(vrp10) or np.isnan(vrp21):
+        return ""
+    lo = min(vrp10, vrp21)
+    if lo >= ASST_VRP_RICH:
+        return "RICH"
+    if lo <= ASST_VRP_CHEAP:
+        return "CHEAP"
+    return "UNCLEAR"
+
+
+def asst_classify(rich, rsi):
+    """ASST state, same vocabulary as MSTR so the dashboard renders it the same way.
+    Richness replaces MSTR's RV-percentile gate (ASST has no percentile worth trusting);
+    the RSI side-selection is borrowed unchanged. CHEAP and UNCLEAR both map to NEUTRAL
+    (the richness column says which)."""
+    if not rich or np.isnan(rsi):
+        return "UNKNOWN"
+    if rich != "RICH":
+        return "NEUTRAL"
+    if rsi <= ASST_RSI_XPUT:
+        return "EXTREME_PUTS"
+    if rsi <= ASST_RSI_PUT:
+        return "OPPORTUNE_PUTS"
+    return "RICH_NO_SIDE"
+
+
+def asst_call_tier(rich, vrp10, vrp21):
+    """Covered-call premium tier mirroring MSTR's structure (richness, not direction):
+    GOOD when RICH, EXTREME when both smoothed VRPs clear ASST_CALL_EXT_VRP."""
+    if rich != "RICH":
+        return ""
+    if min(vrp10, vrp21) >= ASST_CALL_EXT_VRP:
+        return "CALLS_EXTREME_PREMIUM"
+    return "CALLS_GOOD_PREMIUM"
+
+
+def _smooth(prior_rows, key, today, n=ASST_SMOOTH_DAYS):
+    """Mean of today's raw value and the last n-1 logged raw values of `key`. Returns
+    (NaN, 0) when today's value is missing: smoothing must never paper over a failed
+    fetch with yesterday's numbers."""
+    if today is None or np.isnan(today):
+        return float("nan"), 0
+    vals = [float(today)]
+    for r in reversed(prior_rows):
+        if len(vals) >= n:
+            break
+        try:
+            v = float(r.get(key))
+        except (TypeError, ValueError):
+            continue
+        if not np.isnan(v):
+            vals.append(v)
+    return float(np.mean(vals)), len(vals)
+
+
+def asst_derive(m, raw, prior_rows):
+    """Everything the ASST tile shows for one anchor (eod or live), from the price
+    metrics `m`, the (possibly frozen) raw chain reads `raw`, and the log rows BEFORE
+    this date (for smoothing). Pure function: a rerun with the same inputs gives the
+    same row, so frozen chain values keep the logged state stable. Raw chain reads are
+    rounded to log precision FIRST, so a rerun (which sees the logged, rounded values)
+    derives exactly what the first run did."""
+    def logged(v, nd=1):
+        r = _r(v, nd)
+        return float("nan") if r is None else float(r)
+    iv30 = logged(raw["iv30"])
+    raw = dict(raw, iv_mid_share=logged(raw["iv_mid_share"], 0),
+               mstr_iv30=logged(raw["mstr_iv30"]), ibit_iv30=logged(raw["ibit_iv30"]))
+    iv_s, n_iv = _smooth(prior_rows, "iv30", iv30)
+    hv10_s, _ = _smooth(prior_rows, "hv10", m["rv10"])
+    hv21_s, _ = _smooth(prior_rows, "hv21", m["rv21"])
+    vrp10 = iv_s - hv10_s if not np.isnan(iv_s) else float("nan")
+    vrp21 = iv_s - hv21_s if not np.isnan(iv_s) else float("nan")
+    rich = asst_richness(vrp10, vrp21)
+    state = asst_classify(rich, m["rsi"])
+    tier = asst_call_tier(rich, vrp10, vrp21)
+    ratio = lambda peer: (iv30 / peer) if not (np.isnan(iv30) or np.isnan(peer) or peer == 0) else float("nan")
+    return {
+        "state": state,
+        "richness": rich,
+        "dte_reco": DTE_BY_STATE.get(state, "-"),
+        "call_tier": tier,
+        "meltup_risk": meltup_risk(m["rsi"], m["below_ma50"], ASST_MELTUP_RSI),
+        "data_unavailable": bool(np.isnan(iv30)),
+        "iv30": _r(iv30),
+        "iv30_smooth": _r(iv_s),
+        "smooth_n": n_iv,
+        "iv_mid_share": _r(raw["iv_mid_share"], 0),
+        "hv10": _r(m["rv10"]),
+        "hv21": _r(m["rv21"]),
+        "hv30": _r(m["rv30"]),
+        "vrp_hv10": _r(vrp10),
+        "vrp_hv21": _r(vrp21),
+        "vrp_hv10_raw": _r(iv30 - m["rv10"]) if not np.isnan(iv30) else None,
+        "vrp_hv21_raw": _r(iv30 - m["rv21"]) if not np.isnan(iv30) else None,
+        "mstr_iv30": _r(raw["mstr_iv30"]),
+        "ibit_iv30": _r(raw["ibit_iv30"]),
+        "iv_ratio_mstr": _r(ratio(raw["mstr_iv30"]), 2),
+        "iv_ratio_ibit": _r(ratio(raw["ibit_iv30"]), 2),
+        "rv_percentile": _r(m["rvp"]),
+        "rv_pct_n": m["rvp_n"],
+        "close": round(m["close"], 2),
+        "rsi14": round(m["rsi"], 1),
+        "ma20": round(m["ma20"], 2),
+        "ma50": round(m["ma50"], 2),
+        "dist_ma20_pct": round(m["dist_ma20"], 1),
+        "below_ma50": m["below_ma50"],
+        **contract_fields(dict(m, rr25=raw["rr25"], put=raw["put"], call=raw["call"])),
+    }
 
 
 RENAMED_COLS = {"iv_percentile": "rv_percentile"}   # old log column -> new (always realized-vol based)
 CHAIN_COLS = ("iv30", "vrp_iv_minus_hv", "mnav", "btc_price", "rr25_skew",
               "put_contract", "put_mid", "put_iv", "put_yield_pct", "put_ann_pct",
               "call_contract", "call_mid", "call_iv", "call_yield_pct", "call_ann_pct")
+# ASST: the raw chain reads frozen at first record; everything derived is recomputed.
+ASST_FREEZE = ("iv30", "iv_mid_share", "mstr_iv30", "ibit_iv30", "rr25_skew",
+               "put_contract", "put_mid", "put_iv", "put_yield_pct", "put_ann_pct",
+               "call_contract", "call_mid", "call_iv", "call_yield_pct", "call_ann_pct")
 
 
-def load_rows():
-    if not CSV_PATH.exists():
+def load_rows(path=CSV_PATH):
+    if not path.exists():
         return []
     try:
-        with open(CSV_PATH, newline="") as f:
+        with open(path, newline="") as f:
             rows = list(csv.DictReader(f))
     except Exception:
         return []
@@ -403,8 +610,8 @@ def _dedup_sorted(rows):
     return [seen[d] for d in sorted(seen)]
 
 
-def save_rows(rows, fieldnames):
-    with open(CSV_PATH, "w", newline="") as f:
+def save_rows(rows, fieldnames, path=CSV_PATH):
+    with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
@@ -438,15 +645,9 @@ def contract_fields(m):
     return out
 
 
-def main():
-    try:
-        eod, live, partial = compute_metrics()
-    except Exception as e:
-        # Could not get price data this run; skip without crashing. The dashboard's
-        # staleness banner makes any freeze visible, so this won't masquerade as live.
-        print(f"[skip] market data unavailable this run ({type(e).__name__}: {e}); no update written.")
-        return
-
+def run_v2(cfg, eod, live, partial):
+    """The validated MSTR engine: log row, freeze rule, snapshot, console line, alerts.
+    Returns what later tickers may need from this run (MSTR's IV30 for ASST's ratio)."""
     # --- canonical end-of-day row (written to the log; one per completed session) ---
     state = classify(eod["rvp"], eod["vrp"], eod["rsi"], eod["below_ma50"])
     tier = call_tier(eod["rvp"], eod["vrp"])
@@ -473,7 +674,7 @@ def main():
         **{k: ("" if v is None else v) for k, v in contract_fields(eod).items()},
     }
 
-    rows = _dedup_sorted(load_rows())
+    rows = _dedup_sorted(load_rows(cfg["log"]))
     # Look the session up BY DATE across the whole log, not just the last row. Yahoo
     # occasionally serves a daily frame that lags one or two sessions (seen 2026-07-15,
     # 07-27, 08-18, 08-31): the EOD anchor then points at an OLDER date than the last
@@ -510,7 +711,7 @@ def main():
     else:
         rows.append(row)
     rows = _dedup_sorted(rows)              # exactly one row per trading date, ascending
-    save_rows(rows, list(row.keys()))
+    save_rows(rows, list(row.keys()), cfg["log"])
 
     # --- provisional intraday snapshot (for the dashboard; NOT in the canonical log) ---
     # During a live session this reflects today's developing conditions so an intraday
@@ -533,7 +734,7 @@ def main():
         "below_ma50": live["below_ma50"],
         **contract_fields(live),
     }
-    SNAP_PATH.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+    cfg["snap"].write_text(json.dumps(snap, indent=2), encoding="utf-8")
 
     line = (f"{row['date']}  MSTR ${row['close']}  STATE={state}  "
             f"RVPct={row['rv_percentile']}  VRP={row['vrp_iv_minus_hv']}  "
@@ -555,6 +756,120 @@ def main():
     if prev_tier is not None and prev_tier != tier:
         notify(f"MSTR covered-call premium tier: {prev_tier or 'none'} -> {tier or 'none'}\n{line}")
         print(f"[ALERT] call tier changed: {prev_tier or 'none'} -> {tier or 'none'}")
+    return {"iv30": eod["iv30"]}
+
+
+def _unavailable_snapshot(cfg, reason):
+    """Written when a monitor ticker could not be read this run: the dashboard shows
+    '--' plus a data-unavailable flag instead of freezing on an old value."""
+    snap = {
+        "generated_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "provisional": False,
+        "data_unavailable": True,
+        "reason": reason,
+        "asof": None,
+    }
+    cfg["snap"].write_text(json.dumps(snap, indent=2), encoding="utf-8")
+
+
+def run_monitor(cfg, eod, live, partial, peers):
+    """ASST relative-richness monitor: same log discipline as MSTR (one row per trading
+    date, raw chain reads frozen at first record, derived fields recomputed), its own
+    log + snapshot, alerts prefixed as unvalidated."""
+    sym = cfg["symbol"]
+    raw = dict(iv30=eod["iv30"], iv_mid_share=eod["iv_mid_share"], rr25=eod["rr25"],
+               put=eod["put"], call=eod["call"],
+               mstr_iv30=peers.get("MSTR", float("nan")), ibit_iv30=peers.get("IBIT", float("nan")))
+    rows = _dedup_sorted(load_rows(cfg["log"]))
+    date = eod["asof"]
+    idx = next((i for i, r in enumerate(rows) if r.get("date") == date), None)
+    if idx is not None:
+        existing = rows[idx]
+        for k in ("iv30", "iv_mid_share", "mstr_iv30", "ibit_iv30"):
+            if existing.get(k) not in (None, ""):
+                raw[k] = float(existing[k])
+        if existing.get("rr25_skew") not in (None, ""):
+            raw["rr25"] = float(existing["rr25_skew"])
+        for side in ("put", "call"):   # frozen target contracts, rebuilt into the dict shape
+            if existing.get(f"{side}_contract"):
+                raw[side] = dict(contract=existing[f"{side}_contract"],
+                                 mid=float(existing[f"{side}_mid"]), iv=float(existing[f"{side}_iv"]),
+                                 yield_pct=float(existing[f"{side}_yield_pct"]),
+                                 ann_pct=float(existing[f"{side}_ann_pct"]))
+        ref = existing
+    else:
+        earlier = [r for r in rows if r.get("date", "") < date]
+        ref = earlier[-1] if earlier else None
+    prior = [r for r in rows if r.get("date", "") < date]
+    row = {"date": date, **asst_derive(eod, raw, prior)}
+    row = {k: ("" if v is None else v) for k, v in row.items()}
+    if idx is not None:
+        rows[idx] = row
+    else:
+        rows.append(row)
+    rows = _dedup_sorted(rows)
+    save_rows(rows, list(row.keys()), cfg["log"])
+
+    live_raw = dict(raw, iv30=live["iv30"], iv_mid_share=live["iv_mid_share"], rr25=live["rr25"],
+                    put=live["put"], call=live["call"]) if partial else raw
+    live_prior = [r for r in rows if r.get("date", "") < live["asof"]]
+    snap = {
+        "generated_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "provisional": bool(partial),
+        "asof": live["asof"],
+        **asst_derive(live, live_raw, live_prior),
+    }
+    snap["reason"] = "option chain empty or sparse" if snap["data_unavailable"] else ""
+    cfg["snap"].write_text(json.dumps(snap, indent=2), encoding="utf-8")
+
+    line = (f"{date}  {sym} ${row['close']}  STATE={row['state']} ({row['richness'] or 'no VRP'})  "
+            f"IV30={row['iv30']}(s{row['iv30_smooth']}) HV10/21={row['hv10']}/{row['hv21']}  "
+            f"VRP10/21={row['vrp_hv10']}/{row['vrp_hv21']}  IV/MSTR={row['iv_ratio_mstr']} "
+            f"IV/IBIT={row['iv_ratio_ibit']}  RSI={row['rsi14']}  "
+            f"vs50dMA={'below' if eod['below_ma50'] else 'above'}  CallTier={row['call_tier'] or '-'}  "
+            f"Meltup={row['meltup_risk']}  Unavailable={row['data_unavailable']}  [UNVALIDATED monitor]")
+    print(line)
+    if partial:
+        print(f"[live] {sym} provisional {snap['state']} ({snap['richness'] or 'no VRP'})  "
+              f"VRP10/21={snap['vrp_hv10']}/{snap['vrp_hv21']} RSI={snap['rsi14']} close={snap['close']}")
+
+    prev = ref["state"] if ref else None
+    prev_tier = ref.get("call_tier", "") if ref else None
+    if prev is not None and prev != row["state"] and row["state"] != "UNKNOWN":
+        notify(f"{sym} monitor (UNVALIDATED) STATE CHANGE: {prev} -> {row['state']}\n{line}")
+        print(f"[ALERT] {sym} state changed: {prev} -> {row['state']}")
+    if prev_tier is not None and prev_tier != row["call_tier"]:
+        notify(f"{sym} monitor (UNVALIDATED) call tier: {prev_tier or 'none'} -> {row['call_tier'] or 'none'}\n{line}")
+        print(f"[ALERT] {sym} call tier changed: {prev_tier or 'none'} -> {row['call_tier'] or 'none'}")
+    return {"iv30": eod["iv30"]}
+
+
+def main():
+    results = {}
+    for cfg in TICKERS:
+        sym = cfg["symbol"]
+        try:
+            eod, live, partial = compute_metrics(cfg)
+        except Exception as e:
+            # Could not get price data this run; skip without crashing. The dashboard's
+            # staleness banner makes any freeze visible, so this won't masquerade as live.
+            if cfg["engine"] == "v2":
+                print(f"[skip] market data unavailable this run ({type(e).__name__}: {e}); no update written.")
+            else:
+                print(f"[skip] {sym} price data unavailable this run ({type(e).__name__}: {e}); no row written.")
+                _unavailable_snapshot(cfg, f"price data unavailable ({type(e).__name__})")
+            continue
+        try:
+            if cfg["engine"] == "v2":
+                results[sym] = run_v2(cfg, eod, live, partial)
+            else:
+                peers = {p: (results[p]["iv30"] if p in results else peer_iv30(p)) for p in ASST_PEERS}
+                results[sym] = run_monitor(cfg, eod, live, partial, peers)
+        except Exception as e:
+            # One ticker's failure must never take the other down (ASST is additive).
+            print(f"[error] {sym} run failed ({type(e).__name__}: {e})", file=sys.stderr)
+            if cfg["engine"] != "v2":
+                _unavailable_snapshot(cfg, f"run failed ({type(e).__name__})")
 
 
 if __name__ == "__main__":
