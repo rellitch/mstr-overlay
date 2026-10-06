@@ -11,11 +11,28 @@ from zoneinfo import ZoneInfo
 CSV_PATH = Path(__file__).parent / "mstr_overlay_log.csv"
 OUT_PATH = Path(__file__).parent / "index.html"
 SNAP_PATH = Path(__file__).parent / "live_snapshot.json"
+ASST_CSV_PATH = Path(__file__).parent / "asst_overlay_log.csv"
+ASST_SNAP_PATH = Path(__file__).parent / "asst_live_snapshot.json"
+ET = ZoneInfo("America/New_York")
+
+# ---- ASST tile: display-only context (never wired into the engine) ----------
+ASST_WARRANT_BANNER_UNTIL = dt.date(2026, 10, 31)   # banner auto-hides after this date
+ASST_WARRANT_TEXT = ("ASST $27 warrants expire mid-Oct 2026 — expect warrant-driven sell pressure "
+                     "~2–3 wks into expiry; treat oversold / “sell puts” reads as event-driven, not clean signals.")
+ASST_LIQUIDITY_TEXT = ("ASST options are thin: only ATM is liquid, OTM open interest is in the tens and spreads "
+                       "run 25–65% of mid. Any read here is advisory — check the actual strike's bid/ask and "
+                       "open interest before trading.")
+# Mirrors the ASST_* block in mstr_overlay.py. Display only.
+ASST_PARAMS_TEXT = ("Parameters are UNVALIDATED — borrowed from MSTR's v2 thresholds (RSI ≤45 puts / ≤30 extreme; "
+                    "melt-up at RSI ≥60 above the 50-day MA) with the VRP band widened to ±8 vol pts because "
+                    "ASST's spreads make its IV uncertain by about that much. RICH = both smoothed VRPs ≥ +8; "
+                    "CHEAP = either ≤ −8; UNCLEAR between. IV30 and HV are 3-session averages. Lookbacks start "
+                    "2025-09-12 (merger close); the RV percentile is context only. No mNAV: no clean data source.")
 
 
-def load_snapshot():
+def load_snapshot(path=SNAP_PATH):
     try:
-        return json.loads(SNAP_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
 
@@ -283,10 +300,10 @@ def live_panel(snap, rows=()):
         f"Updates only when a monitor run fires (cron is best-effort) &mdash; force a run for the freshest read.</div>"
         f"</div>")
 
-def load_rows():
-    if not CSV_PATH.exists():
+def load_rows(path=CSV_PATH):
+    if not path.exists():
         return []
-    with open(CSV_PATH) as f:
+    with open(path) as f:
         rows = list(csv.DictReader(f))
     for r in rows:   # pre-rename logs: iv_percentile was always the realized-vol percentile
         if "iv_percentile" in r:
@@ -328,12 +345,153 @@ def sparkline_svg(rows, key, w=720, h=140, lo=0, hi=100, refs=(50, 80)):
     return (f"<svg viewBox='0 0 {w} {h}' width='100%' style='max-width:{w}px'>"
             f"{ref_lines}<path d='{path}' fill='none' stroke='#344054' stroke-width='1.5'/>{dots}</svg>")
 
+RICH_META = {   # ASST richness read (the monitor's replacement for MSTR's RV-percentile gate)
+    "RICH":    ("#0f7a3d", "both smoothed VRPs ≥ +8 — IV is paying comfortably over recent movement"),
+    "UNCLEAR": ("#6b7a8f", "VRPs inside the ±8 noise band — no honest richness read"),
+    "CHEAP":   ("#b54708", "a smoothed VRP ≤ −8 — premium is cheap vs. movement; stand down"),
+    "":        ("#9ca3af", "VRP unavailable (no chain IV this run)"),
+}
+
+
+def _flag(text, color):
+    return f"<span class='pill' style='background:{color}'>{html.escape(text)}</span>"
+
+
+def asst_section(rows, snap, today=None):
+    """Compact ASST tile. Everything here is labeled unvalidated / monitor-only, and the
+    tile shows '—' with a DATA UNAVAILABLE flag whenever the run could not read ASST,
+    rather than freezing on an old value. Independent of the MSTR section above it."""
+    today = today or dt.datetime.now(ET).date()
+    snap = snap or {}
+    cur = rows[-1] if rows else {}
+    expected = last_completed_session().isoformat()
+
+    unavailable = bool(snap.get("data_unavailable")) or str(cur.get("data_unavailable", "")).lower() == "true"
+    reason = snap.get("reason") or ("option chain empty or sparse" if unavailable else "")
+    missed = bool(cur) and cur.get("date", "") < expected        # no run landed for the last session
+    hide = unavailable or not cur     # metrics show '—' (never an old value) when the read failed
+    def v(key, nd=1, prefix=""):
+        return "—" if hide else fnum(cur.get(key), nd, prefix)
+
+    flags = ""
+    if unavailable:
+        flags += _flag(f"DATA UNAVAILABLE — {reason}", "#b42318")
+    if missed:
+        flags += _flag(f"STALE — latest row {cur.get('date')}, last session {expected}", "#b54708")
+    if not unavailable and not missed and cur:
+        flags += _flag("market closed — confirmed read for " + cur.get("date", ""), "#475467")
+    if int(float(cur.get("smooth_n") or 0)) < 3 and cur and not hide:
+        flags += _flag(f"smoothing over {int(float(cur.get('smooth_n') or 0))} session(s) — needs 3 logged", "#6b7a8f")
+
+    state = "UNKNOWN" if hide else cur.get("state", "UNKNOWN")
+    title, color, _ = STATE_META.get(state, STATE_META["UNKNOWN"])
+    rich = "" if hide else (cur.get("richness") or "")
+    rich_color, rich_blurb = RICH_META.get(rich, RICH_META[""])
+    tier = "" if hide else (cur.get("call_tier") or "")
+    tier_title, tier_color, _ = TIER_META.get(tier, TIER_META[""])
+    meltup = (not hide) and str(cur.get("meltup_risk", "")).lower() == "true"
+
+    warrant = ""
+    if today <= ASST_WARRANT_BANNER_UNTIL:
+        warrant = ("<div style='background:#fffaeb;border:1px solid #fedf89;border-left:6px solid #b54708;"
+                   "border-radius:10px;padding:10px 14px;margin:8px 0;font-size:13px;color:#7a2e0e'>"
+                   f"&#9888; <b>Warrant overhang:</b> {html.escape(ASST_WARRANT_TEXT)} "
+                   f"<span style='color:#98a2b3'>(banner auto-hides after {ASST_WARRANT_BANNER_UNTIL})</span></div>")
+
+    live = ""
+    if snap.get("provisional") and not unavailable:
+        s = lambda k: html.escape("—" if snap.get(k) in (None, "") else str(snap.get(k)))
+        live = (f"<div style='border:2px dashed {STATE_META.get(snap.get('state', 'UNKNOWN'), STATE_META['UNKNOWN'])[1]};"
+                "border-radius:12px;padding:10px 14px;margin:8px 0;background:#fff;font-size:13px;color:#475467'>"
+                f"{_flag('LIVE · ' + str(snap.get('state')), STATE_META.get(snap.get('state', 'UNKNOWN'), STATE_META['UNKNOWN'])[1])} "
+                f"<b style='color:#b54708'>PROVISIONAL</b> &middot; richness <b>{s('richness')}</b> &middot; "
+                f"VRP vs HV10/HV21 <b>{s('vrp_hv10')}/{s('vrp_hv21')}</b> &middot; RSI <b>{s('rsi14')}</b> &middot; "
+                f"close <b>{s('close')}</b> &middot; session {s('asof')}, generated {s('generated_utc')}</div>")
+
+    cards = [
+        ("IV30 (near-money, OTM strikes)", v("iv30"),
+         "—" if hide else f"3-day avg {fnum(cur.get('iv30_smooth'))} · {fnum(cur.get('iv_mid_share'), 0)}% of strikes from bid/ask mid"),
+        ("HV10 / HV21", "—" if hide else f"{fnum(cur.get('hv10'), 0)} / {fnum(cur.get('hv21'), 0)}", "short realized vol (HV30 " + ("—" if hide else fnum(cur.get("hv30"), 0)) + ")"),
+        ("VRP vs HV10", v("vrp_hv10"), "—" if hide else f"smoothed; raw {fnum(cur.get('vrp_hv10_raw'))} · primary"),
+        ("VRP vs HV21", v("vrp_hv21"), "—" if hide else f"smoothed; raw {fnum(cur.get('vrp_hv21_raw'))} · read as a range with HV10"),
+        ("IV30 ÷ MSTR IV30", v("iv_ratio_mstr", 2), "—" if hide else f"MSTR IV30 {fnum(cur.get('mstr_iv30'), 0)} · BTC-regime normalizer, context only"),
+        ("IV30 ÷ IBIT IV30", v("iv_ratio_ibit", 2), "—" if hide else f"IBIT IV30 {fnum(cur.get('ibit_iv30'), 0)} · high = rich vs BTC peers"),
+        ("RSI(14)", v("rsi14", 0), "puts side selection; ≥60 = melt-up flag"),
+        ("Price", v("close", 2), "ASST close"),
+        ("vs 50-day MA", "—" if hide else ("below" if str(cur.get("below_ma50")).lower() == "true" else "above"), "trend context"),
+        ("RV percentile", v("rv_percentile"), "—" if hide else f"vs {cur.get('rv_pct_n', '?')} days since 2025-09-12 · LOW CONFIDENCE, context only"),
+        ("DTE to sell", "—" if hide else html.escape(str(cur.get("dte_reco", "—"))), "recommended tenor (puts)"),
+    ]
+    card_html = "".join(
+        f"<div class='card'><div class='k'>{html.escape(k)}</div>"
+        f"<div class='v'>{html.escape(str(val))}</div><div class='s'>{html.escape(sub)}</div></div>"
+        for k, val, sub in cards)
+
+    if hide:
+        contracts = ("<div class='card'><div class='k'>Cash-secured put · ~30Δ, 30–45 DTE</div><div class='v'>—</div></div>"
+                     "<div class='card'><div class='k'>Covered call · ~10Δ, 40–45 DTE</div><div class='v'>—</div></div>")
+    else:
+        contracts = (contract_card(cur, "put", "Cash-secured put · ~30Δ, 30–45 DTE", "cash secured")
+                     + contract_card(cur, "call", "Covered call · ~10Δ, 40–45 DTE", "shares held"))
+
+    cols = ["date", "state", "richness", "call_tier", "iv30", "hv10", "hv21", "vrp_hv10", "vrp_hv21",
+            "iv_ratio_mstr", "iv_ratio_ibit", "rsi14", "close", "below_ma50", "data_unavailable"]
+    head = "".join(f"<th>{html.escape(c)}</th>" for c in cols)
+    trs = ""
+    for r in rows[-15:][::-1]:
+        tds = ""
+        for col in cols:
+            val = html.escape(str(r.get(col) or ""))
+            if col == "state":
+                val = f"<span class='pill' style='background:{STATE_META.get(r.get('state', ''), ('', '#888', ''))[1]}'>{val}</span>"
+            elif col == "richness" and r.get("richness"):
+                val = f"<span class='pill' style='background:{RICH_META.get(r.get('richness'), RICH_META[''])[0]}'>{val}</span>"
+            elif col == "call_tier" and r.get("call_tier"):
+                val = f"<span class='pill' style='background:{TIER_META.get(r.get('call_tier', ''), TIER_META[''])[1]}'>{val}</span>"
+            tds += f"<td>{val}</td>"
+        trs += f"<tr>{tds}</tr>"
+    table = (f"<div style='overflow-x:auto'><table><thead><tr>{head}</tr></thead><tbody>{trs}</tbody></table></div>"
+             if rows else "<p class='muted'>No ASST readings logged yet.</p>")
+
+    meltup_html = ("<div style='background:#b42318;color:#fff;border-radius:10px;padding:10px 14px;margin:0 0 10px;font-size:13px'>"
+                   "&#9888; <b>MELT-UP RISK</b> &mdash; RSI&ge;60 above the 50-day MA (same regime logic as MSTR, "
+                   "unvalidated on ASST): if writing covered calls anyway, size down and expect to roll or be assigned.</div>"
+                   if meltup else "")
+    return f"""
+      <hr style='border:0;border-top:2px solid #d0d5dd;margin:34px 0 18px'>
+      <h1 style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>ASST (Strive) &mdash; relative-richness monitor
+        {_flag('UNVALIDATED · MONITOR-ONLY', '#7c2d92')}</h1>
+      <div class='muted'>Not a backtested signal. ASST's Bitcoin-treasury era began 2025-09-12 (~1 year of relevant history),
+      so richness is scored RELATIVELY each run: IV30 against short realized vol, and against MSTR/IBIT IV. Full wheel (puts and calls).</div>
+      <div class='legend' style='margin:6px 0'>{flags}</div>
+      {warrant}
+      {live}
+      <div class='banner' style='background:{color};margin:10px 0 12px'>
+        <div class='banner-state'>{html.escape(title)}</div>
+        <div class='banner-blurb'>Richness: <b>{html.escape(rich or '—')}</b> &mdash; {html.escape(rich_blurb)}</div>
+        <div class='banner-date'>{'Read unavailable this run' if hide else 'Confirmed read &mdash; last completed session: ' + html.escape(cur.get('date', ''))} &middot; monitor only, parameters unvalidated</div>
+      </div>
+      <div style='border:1px solid #eaecf0;border-left:6px solid {tier_color};background:#fff;border-radius:12px;padding:10px 16px;margin:0 0 10px'>
+        <div style='font-size:13px;color:#667085'>Covered-call premium tier <span style='color:#98a2b3'>(richness, not direction; 10&Delta;, 40&ndash;45 DTE)</span></div>
+        <div style='font-size:17px;font-weight:700;color:{tier_color}'>{'—' if hide else html.escape(tier_title)}</div></div>
+      {meltup_html}
+      <div class='grid'>{card_html}</div>
+      <div class='grid' style='margin-top:10px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))'>{contracts}</div>
+      <div style='background:#f2f4f7;border-radius:10px;padding:10px 14px;margin:12px 0;font-size:12px;color:#475467'>
+        <b>Liquidity reality:</b> {html.escape(ASST_LIQUIDITY_TEXT)}</div>
+      <p class='muted'>{html.escape(ASST_PARAMS_TEXT)}</p>
+      <h2>ASST recent readings</h2>
+      {table}
+    """
+
+
 def build():
     rows = load_rows()
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    asst_html = "<!-- asst-section -->" + asst_section(load_rows(ASST_CSV_PATH), load_snapshot(ASST_SNAP_PATH))
     if not rows:
         body = "<p>No readings logged yet. Run the monitor once, then rebuild.</p>"
-        OUT_PATH.write_text(PAGE.format(updated=now, body=body), encoding="utf-8")
+        OUT_PATH.write_text(PAGE.format(updated=now, body=body + asst_html), encoding="utf-8")
         print("Wrote", OUT_PATH, "(empty log)")
         return
 
@@ -448,12 +606,12 @@ def build():
       <p class='muted'>This is a volatility/price-timing signal only. It does not size positions or place trades,
       and it is blind to fundamental shocks — your own monitoring sits above it.</p>
     """
-    OUT_PATH.write_text(PAGE.format(updated=now, body=body), encoding="utf-8")
+    OUT_PATH.write_text(PAGE.format(updated=now, body=body + asst_html), encoding="utf-8")
     print("Wrote", OUT_PATH, "| current state:", state)
 
 PAGE = """<!doctype html><html lang='en'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>MSTR Overlay Dashboard</title>
+<title>MSTR + ASST Overlay Dashboard</title>
 <style>
   :root {{ font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
   body {{ margin:0; background:#f7f8fa; color:#1d2939; padding:18px; }}
