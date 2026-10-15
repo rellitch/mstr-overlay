@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-10-15 21:16 UTC",
+  "generated_utc": "2026-10-15 23:47 UTC",
   "provisional": false,
   "asof": "2026-10-15",
   "state": "NEUTRAL",
@@ -7,8 +7,8 @@
   "call_tier": "",
   "meltup_risk": false,
   "rv_percentile": 71.9,
-  "vrp_iv_minus_hv": -15.9,
-  "iv30": 70.2,
+  "vrp_iv_minus_hv": -15.8,
+  "iv30": 70.3,
   "hv30": 86.1,
   "close": 151.29,
   "rsi14": 52.4,
@@ -16,12 +16,12 @@
   "rr25_skew": 0.1,
   "put_contract": "2026-11-20 140P",
   "put_mid": 7.6,
-  "put_iv": 69.7,
+  "put_iv": 69.8,
   "put_yield_pct": 5.43,
   "put_ann_pct": 55.0,
   "call_contract": "2026-11-27 215C",
   "call_mid": 1.57,
-  "call_iv": 71.6,
+  "call_iv": 71.7,
   "call_yield_pct": 1.04,
   "call_ann_pct": 8.8
 }
