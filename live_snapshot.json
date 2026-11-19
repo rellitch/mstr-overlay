@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-11-18 21:20 UTC",
+  "generated_utc": "2026-11-19 02:45 UTC",
   "provisional": false,
   "asof": "2026-11-18",
   "state": "OPPORTUNE_PUTS",
@@ -7,8 +7,8 @@
   "call_tier": "",
   "meltup_risk": false,
   "rv_percentile": 56.2,
-  "vrp_iv_minus_hv": 16.4,
-  "iv30": 91.0,
+  "vrp_iv_minus_hv": 16.7,
+  "iv30": 91.2,
   "hv30": 74.5,
   "close": 90.32,
   "rsi14": 24.0,
@@ -16,12 +16,12 @@
   "rr25_skew": -12.2,
   "put_contract": "2026-12-24 80P",
   "put_mid": 5.55,
-  "put_iv": 94.2,
+  "put_iv": 94.5,
   "put_yield_pct": 6.94,
   "put_ann_pct": 70.3,
   "call_contract": "2026-12-31 135C",
   "call_mid": 1.12,
-  "call_iv": 82.4,
+  "call_iv": 82.6,
   "call_yield_pct": 1.24,
   "call_ann_pct": 10.5
 }
