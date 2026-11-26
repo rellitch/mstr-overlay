@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Ticker Wallpaper</title>
+<!--
+  Live desktop wallpaper: one big TradingView chart + a scrolling ticker tape.
+  Built for Lively Wallpaper (Windows): right-click the wallpaper > Customise to
+  change the tickers, chart symbol, timeframe, theme and margins.
+  In a normal browser the same settings can be passed as URL parameters, e.g.
+    index.html?tickers=BTC,SPY,MSTR,ASST&chart=BTC&interval=60&theme=dark&bottom=48&left=0
+-->
+<style>
+  :root {
+    --bg: #0b0e14;
+    --muted: #6e7681;
+    --pad-top: 0px;
+    --pad-left: 0px;
+    --pad-bottom: 48px;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --muted: #656d76;
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #app {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    padding: var(--pad-top) 0 var(--pad-bottom) var(--pad-left);
+    display: flex;
+    flex-direction: column;
+  }
+  #tape {
+    flex: 0 0 auto;
+    position: relative;
+    min-height: 46px;
+  }
+  /* Blocks clicks on the tape so clicking the desktop doesn't open TradingView in a browser. */
+  #tape .shield {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+  }
+  #chart {
+    flex: 1 1 auto;
+    min-height: 0;
+    position: relative;
+  }
+  .tradingview-widget-container,
+  .tradingview-widget-container__widget {
+    width: 100%;
+    height: 100%;
+  }
+  .tradingview-widget-copyright {
+    position: absolute;
+    right: 10px;
+    bottom: 4px;
+    z-index: 3;
+    font-size: 10px;
+    opacity: 0.55;
+  }
+  .tradingview-widget-copyright a {
+    color: var(--muted);
+    text-decoration: none;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="tape"></div>
+  <div id="chart"></div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+// Plain tickers that need an exchange prefix to resolve to the right market.
+// Anything else is passed through as typed: "AAPL" works, and so does an
+// explicit "EXCHANGE:SYMBOL" such as "BINANCE:ETHUSDT".
+var ALIASES = {
+  BTC: "COINBASE:BTCUSD",
+  BITCOIN: "COINBASE:BTCUSD",
+  ETH: "COINBASE:ETHUSD",
+  SOL: "COINBASE:SOLUSD",
+  SPY: "AMEX:SPY",
+  QQQ: "NASDAQ:QQQ",
+  MSTR: "NASDAQ:MSTR",
+  ASST: "NASDAQ:ASST"
+};
+
+// Lively dropdown index -> TradingView interval (must match LivelyProperties.json).
+var INTERVALS = ["1", "5", "15", "60", "240", "D", "W"];
+
+var settings = {
+  tickers: "BTC, SPY, MSTR, ASST",
+  chartSymbol: "BTC",
+  interval: "60",
+  theme: "dark",
+  toolbars: false,
+  bottom: 48,
+  left: 0
+};
+
+// URL parameters (handy when testing in a browser or adding the page to Lively by URL).
+(function readUrlParams() {
+  var p = new URLSearchParams(location.search);
+  if (p.has("tickers")) settings.tickers = p.get("tickers");
+  if (p.has("chart")) settings.chartSymbol = p.get("chart");
+  if (p.has("interval")) {
+    var iv = p.get("interval").toUpperCase();
+    if (INTERVALS.indexOf(iv) !== -1) settings.interval = iv;
+  }
+  if (p.has("theme")) settings.theme = p.get("theme") === "light" ? "light" : "dark";
+  if (p.has("toolbars")) settings.toolbars = p.get("toolbars") === "1" || p.get("toolbars") === "true";
+  if (p.has("bottom")) settings.bottom = toPx(p.get("bottom"), settings.bottom);
+  if (p.has("left")) settings.left = toPx(p.get("left"), settings.left);
+})();
+
+function toPx(v, fallback) {
+  var n = Number(v);
+  return isFinite(n) && n >= 0 ? Math.round(n) : fallback;
+}
+
+function parseTickers(text) {
+  var seen = {};
+  return String(text || "")
+    .split(/[\s,;]+/)
+    .map(function (t) { return t.trim().toUpperCase(); })
+    .filter(function (t) {
+      if (!t || !/^[A-Z0-9:._!^&-]+$/.test(t) || seen[t]) return false;
+      seen[t] = true;
+      return true;
+    });
+}
+
+function resolveSymbol(ticker) {
+  return ticker.indexOf(":") !== -1 ? ticker : (ALIASES[ticker] || ticker);
+}
+
+// ---------------------------------------------------------------------------
+// Widgets
+// ---------------------------------------------------------------------------
+
+var TAPE_SRC = "https://s3.tradingview.com/external-embedding/embed-widget-ticker-tape.js";
+var CHART_SRC = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+
+var lastTape = "";
+var lastChart = "";
+
+function tapeConfig() {
+  var tickers = parseTickers(settings.tickers);
+  if (!tickers.length) tickers = ["BTC"];
+  return {
+    symbols: tickers.map(function (t) {
+      return { proName: resolveSymbol(t), title: t, description: t };
+    }),
+    showSymbolLogo: true,
+    isTransparent: true,
+    displayMode: "adaptive",
+    colorTheme: settings.theme,
+    locale: "en"
+  };
+}
+
+function chartConfig() {
+  var sym = parseTickers(settings.chartSymbol)[0] || parseTickers(settings.tickers)[0] || "BTC";
+  var dark = settings.theme === "dark";
+  var tz = "Etc/UTC";
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || tz; } catch (e) {}
+  return {
+    autosize: true,
+    symbol: resolveSymbol(sym),
+    interval: settings.interval,
+    timezone: tz,
+    theme: settings.theme,
+    style: "1",
+    locale: "en",
+    backgroundColor: dark ? "#0b0e14" : "#ffffff",
+    gridColor: dark ? "rgba(240, 243, 250, 0.05)" : "rgba(46, 46, 46, 0.06)",
+    hide_top_toolbar: !settings.toolbars,
+    hide_side_toolbar: !settings.toolbars,
+    hide_legend: false,
+    allow_symbol_change: false,
+    save_image: false,
+    calendar: false,
+    support_host: "https://www.tradingview.com"
+  };
+}
+
+function mountWidget(host, src, config, extra) {
+  host.replaceChildren();
+  var box = document.createElement("div");
+  box.className = "tradingview-widget-container";
+  var inner = document.createElement("div");
+  inner.className = "tradingview-widget-container__widget";
+  box.appendChild(inner);
+  if (extra) extra(box, host);
+  var s = document.createElement("script");
+  s.type = "text/javascript";
+  s.src = src;
+  s.async = true;
+  s.textContent = JSON.stringify(config);
+  box.appendChild(s);
+  host.appendChild(box);
+}
+
+function addShield(box, host) {
+  var shield = document.createElement("div");
+  shield.className = "shield";
+  host.appendChild(shield);
+}
+
+function addCopyright(box) {
+  var div = document.createElement("div");
+  div.className = "tradingview-widget-copyright";
+  var a = document.createElement("a");
+  a.href = "https://www.tradingview.com/";
+  a.rel = "noopener nofollow";
+  a.target = "_blank";
+  a.textContent = "Charts by TradingView";
+  div.appendChild(a);
+  box.appendChild(div);
+}
+
+function applyLayout() {
+  var root = document.documentElement;
+  root.dataset.theme = settings.theme;
+  root.style.setProperty("--pad-bottom", settings.bottom + "px");
+  root.style.setProperty("--pad-left", settings.left + "px");
+}
+
+// Rebuilds only the widgets whose config changed (force = rebuild both).
+function render(force) {
+  applyLayout();
+  var tape = tapeConfig();
+  var chart = chartConfig();
+  var tapeKey = JSON.stringify(tape);
+  var chartKey = JSON.stringify(chart);
+  if (force || tapeKey !== lastTape) {
+    lastTape = tapeKey;
+    mountWidget(document.getElementById("tape"), TAPE_SRC, tape, addShield);
+  }
+  if (force || chartKey !== lastChart) {
+    lastChart = chartKey;
+    mountWidget(document.getElementById("chart"), CHART_SRC, chart, addCopyright);
+  }
+}
+
+var renderTimer = null;
+function scheduleRender(delayMs) {
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(function () { render(false); }, delayMs);
+}
+
+// ---------------------------------------------------------------------------
+// Lively Wallpaper hook: called once per property on load, then on every
+// change in the Customise panel. Textboxes fire on each keystroke, so typing
+// is debounced before the widgets reload.
+// ---------------------------------------------------------------------------
+function livelyPropertyListener(name, val) {
+  switch (name) {
+    case "tickers":
+      settings.tickers = String(val);
+      scheduleRender(1200);
+      break;
+    case "chartSymbol":
+      settings.chartSymbol = String(val);
+      scheduleRender(1200);
+      break;
+    case "interval":
+      settings.interval = INTERVALS[Number(val)] || "60";
+      scheduleRender(200);
+      break;
+    case "theme":
+      settings.theme = Number(val) === 1 ? "light" : "dark";
+      scheduleRender(200);
+      break;
+    case "showToolbars":
+      settings.toolbars = val === true || val === "true";
+      scheduleRender(200);
+      break;
+    case "bottomSpace":
+      settings.bottom = toPx(val, settings.bottom);
+      applyLayout();
+      break;
+    case "leftSpace":
+      settings.left = toPx(val, settings.left);
+      applyLayout();
+      break;
+  }
+}
+
+// First paint shortly after load, so Lively's initial property calls (if any)
+// land in the same render instead of causing a second reload.
+applyLayout();
+scheduleRender(300);
+
+// Safety net for long uptimes and sleep/wake: reload the widgets every 6 hours
+// and whenever the network comes back.
+setInterval(function () { render(true); }, 6 * 60 * 60 * 1000);
+window.addEventListener("online", function () { render(true); });
+</script>
+</body>
+</html>

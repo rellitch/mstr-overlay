@@ -1,0 +1,14 @@
+{
+  "AppVersion": "2.0.0.0",
+  "Title": "Live Ticker Wallpaper",
+  "Thumbnail": "thumbnail.jpg",
+  "Preview": null,
+  "Desc": "Live Bitcoin and stock prices: a big TradingView chart plus a scrolling ticker tape. Right-click the wallpaper > Customise to change tickers.",
+  "Author": "mstr-overlay",
+  "License": null,
+  "Contact": null,
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false
+}
