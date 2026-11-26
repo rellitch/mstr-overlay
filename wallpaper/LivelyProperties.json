@@ -1,0 +1,45 @@
+{
+  "tickers": {
+    "type": "textbox",
+    "value": "BTC, SPY, MSTR, ASST",
+    "text": "Ticker tape (comma-separated, e.g. AAPL or NASDAQ:AAPL)"
+  },
+  "chartSymbol": {
+    "type": "textbox",
+    "value": "BTC",
+    "text": "Big chart symbol"
+  },
+  "interval": {
+    "type": "dropdown",
+    "value": 3,
+    "text": "Chart timeframe",
+    "items": ["1 minute", "5 minutes", "15 minutes", "1 hour", "4 hours", "1 day", "1 week"]
+  },
+  "theme": {
+    "type": "dropdown",
+    "value": 0,
+    "text": "Theme",
+    "items": ["Dark", "Light"]
+  },
+  "showToolbars": {
+    "type": "checkbox",
+    "value": false,
+    "text": "Show chart toolbars"
+  },
+  "bottomSpace": {
+    "type": "slider",
+    "value": 48,
+    "min": 0,
+    "max": 200,
+    "step": 1,
+    "text": "Space at bottom for taskbar (px)"
+  },
+  "leftSpace": {
+    "type": "slider",
+    "value": 0,
+    "min": 0,
+    "max": 600,
+    "step": 10,
+    "text": "Space at left for desktop icons (px)"
+  }
+}
